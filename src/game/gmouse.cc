@@ -1000,7 +1000,21 @@ void gmouse_handle_event(int mouseX, int mouseY, int mouseState)
         if (gmouse_3d_current_mode == GAME_MOUSE_MODE_CROSSHAIR) {
             Object* target = object_under_mouse(OBJ_TYPE_CRITTER, false, map_elevation);
             if (target != NULL) {
-                combat_attack_this(target);
+                if (coopnet_get_role() == CoopRole::Client) {
+                    // combat_attack_this() is deeply tied to obj_dude (reads
+                    // the interface's weapon/aim-mode selection, reports
+                    // out-of-ammo/range via player messages) and the client
+                    // never runs its own local combat_state anyway (see
+                    // combat()'s role guard). Send the clicked enemy as a
+                    // targeted attack request for the companion instead --
+                    // resolved against the synced participant table
+                    // host-side, see coopnet_on_client_attack()'s comment.
+                    if (coopnet_is_companion_turn_active()) {
+                        coopnet_on_client_attack(target);
+                    }
+                } else {
+                    combat_attack_this(target);
+                }
                 gmouse_3d_hover_test = true;
                 gmouse_3d_last_mouse_y = mouseY;
                 gmouse_3d_last_mouse_x = mouseX;

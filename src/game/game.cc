@@ -584,14 +584,15 @@ int game_handle_input(int eventCode, bool isInCombatMode)
         break;
     case KEY_UPPERCASE_A:
     case KEY_LOWERCASE_A:
-        // Coop client's combat "attack" -- the client never runs combat()
-        // locally at all (see its role guard in combat.cc), so this key is
-        // otherwise meaningless for it; repurposed to request an
-        // auto-targeted attack for the companion during its own turn. See
-        // coopnet_on_client_attack()'s comment for why it's auto-targeted.
+        // Coop client's combat "attack" fallback -- the client never runs
+        // combat() locally at all (see its role guard in combat.cc), so this
+        // key is otherwise meaningless for it. Auto-targeted (NULL) since a
+        // plain key press has no specific enemy in mind; clicking a synced
+        // enemy directly (see gmouse.cc's CROSSHAIR mode handling) targets
+        // it specifically instead.
         if (coopnet_get_role() == CoopRole::Client) {
             if (coopnet_is_companion_turn_active()) {
-                coopnet_on_client_attack();
+                coopnet_on_client_attack(NULL);
             }
         } else if (intface_is_enabled()) {
             if (!isInCombatMode) {
