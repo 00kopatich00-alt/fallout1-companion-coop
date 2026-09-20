@@ -709,18 +709,26 @@ int game_handle_input(int eventCode, bool isInCombatMode)
             }
         }
         break;
-    case KEY_HOME:
-        if (obj_dude->elevation != map_elevation) {
-            map_set_elevation(obj_dude->elevation);
+    case KEY_HOME: {
+        // As a coop client, recenter on the companion (the character being
+        // played) rather than the client's own network-mirrored obj_dude.
+        Object* homeTarget = obj_dude;
+        if (coopnet_get_role() == CoopRole::Client && coopnet_get_companion() != NULL) {
+            homeTarget = coopnet_get_companion();
+        }
+
+        if (homeTarget->elevation != map_elevation) {
+            map_set_elevation(homeTarget->elevation);
         }
 
         if (game_in_mapper) {
-            tile_set_center(obj_dude->tile, TILE_SET_CENTER_REFRESH_WINDOW);
+            tile_set_center(homeTarget->tile, TILE_SET_CENTER_REFRESH_WINDOW);
         } else {
-            tile_scroll_to(obj_dude->tile, 2);
+            tile_scroll_to(homeTarget->tile, 2);
         }
 
         break;
+    }
     case KEY_1:
     case KEY_EXCLAMATION:
         if (intface_is_enabled()) {
