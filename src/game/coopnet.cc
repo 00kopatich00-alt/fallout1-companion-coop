@@ -24,13 +24,20 @@ typedef int CoopSocket;
 #define COOP_INVALID_SOCKET (-1)
 #endif
 
+#include "game/actions.h"
 #include "game/anim.h"
+#include "game/combat.h"
+#include "game/combatai.h"
+#include "game/game.h"
+#include "game/item.h"
 #include "game/map.h"
 #include "game/object.h"
 #include "game/party.h"
 #include "game/protinst.h"
 #include "game/tile.h"
 #include "plib/gnw/debug.h"
+#include "plib/gnw/input.h"
+#include "plib/gnw/svga.h"
 #include "plib/gnw/intrface.h"
 #include "plib/gnw/rect.h"
 
@@ -55,6 +62,13 @@ enum CoopMsgType : uint8_t {
     COOP_MSG_HEARTBEAT = 5, // either direction, keepalive
     COOP_MSG_ITEM_DROPPED = 6, // either direction, an item appeared on the ground
     COOP_MSG_ITEM_PICKED_UP = 7, // either direction, a ground item was picked up
+    COOP_MSG_PICKUP_REQUEST = 8, // client -> host, "have the companion pick up this ground item"
+    COOP_MSG_USE_REQUEST = 9, // client -> host, "have the companion use this scenery object (e.g. a door)"
+    COOP_MSG_COMPANION_INVENTORY = 10, // host -> client, full snapshot of the companion's current inventory
+    COOP_MSG_COMBAT_TURN = 11, // host -> client, companion's combat turn started/ended + current AP
+    COOP_MSG_COMBAT_ACTION = 12, // client -> host, the companion's chosen combat action (move or end-turn for now)
+    COOP_MSG_COMBAT_BEGIN = 13, // host -> client, a synced combat has started
+    COOP_MSG_COMBAT_END = 14, // host -> client, the synced combat has ended
 };
 
 const uint32_t kCoopProtocolVersion = 1;
@@ -82,6 +96,28 @@ struct CoopPosition {
     int32_t rotation;
 };
 
+// actionPoints > 0 means it's now the companion's combat turn (with this
+// many AP to spend); actionPoints <= 0 means the turn just ended (client
+// should stop sending COOP_MSG_COMBAT_ACTION until the next one of these).
+struct CoopCombatTurn {
+    int32_t actionPoints;
+};
+
+enum CoopCombatActionType : uint8_t {
+    COOP_COMBAT_ACTION_MOVE = 0,
+    COOP_COMBAT_ACTION_END_TURN = 1,
+    // "Attack" is auto-targeted for now, no client-side enemy targeting UI
+    // yet (that needs participant mirroring, not yet built) -- reuses
+    // combat_ai()'s own targeting/attack logic, see
+    // coopnet_host_apply_combat_attack().
+    COOP_COMBAT_ACTION_ATTACK = 2,
+};
+
+struct CoopCombatAction {
+    uint8_t actionType;
+    int32_t targetTile; // valid when actionType == COOP_COMBAT_ACTION_MOVE
+};
+
 // Used for both COOP_MSG_ITEM_DROPPED and COOP_MSG_ITEM_PICKED_UP. Identifies
 // an item by (pid, tile, elevation) rather than a shared unique id — see the
 // caveat on coopnet_notify_item_dropped()/coopnet_notify_item_picked_up() in
@@ -90,6 +126,31 @@ struct CoopItemEvent {
     int32_t pid;
     int32_t tile;
     int32_t elevation;
+};
+
+// The companion's inventory lives as a real, independent Object on each
+// side (host's is authoritative; the client's is a mirror puppeted only by
+// position broadcasts) -- unlike ground items, its *contents* were never
+// synced at all until this, which is why picking something up completed
+// correctly on the host (confirmed via testing/debug log) but never showed
+// up in the client's own "open inventory" window. Sent host -> client
+// whenever the companion's inventory changes (and once on connect), always
+// as a full snapshot rather than an incremental diff -- simplest thing that
+// can't drift out of sync. Fixed capacity/size (not a true variable-length
+// message) to keep wire framing simple; excess items beyond the cap are
+// silently dropped from the sync, a known limitation for a very heavily
+// loaded companion. Only covers loose inventory contents, not which items
+// are equipped in hand/worn slots or partial ammo/charge counts on them.
+const int kCoopMaxInventorySyncItems = 30;
+
+struct CoopInventoryItemEntry {
+    int32_t pid;
+    int32_t quantity;
+};
+
+struct CoopInventorySync {
+    uint8_t itemCount;
+    CoopInventoryItemEntry items[kCoopMaxInventorySyncItems];
 };
 
 #pragma pack(pop)
@@ -120,6 +181,28 @@ static CoopSocket g_coopPeerSocket = COOP_INVALID_SOCKET;
 
 static Object* g_coopCompanion = NULL;
 
+// Client-side only: true while it's the companion's combat turn, per the
+// most recent COOP_MSG_COMBAT_TURN received. Gates gmouse.cc's click
+// handling between a plain exploration-mode move-intent and a turn-gated
+// combat move action, and gates whether an end-turn key press means anything.
+static bool g_coopClientCombatTurnActive = false;
+
+// Client-side only: true while a synced combat is happening on the host, per
+// the most recent COOP_MSG_COMBAT_BEGIN/_END received. Only used to show a
+// one-time notification and avoid repeating it -- see coopnet_apply_combat_begin()/
+// coopnet_apply_combat_end().
+static bool g_coopClientInCombat = false;
+
+// Host-side only: true only while coopnet_combat_input()'s own loop is
+// running, i.e. genuinely the companion's turn. Gates applying an incoming
+// COOP_MSG_COMBAT_ACTION -- without this, a message that arrives late (after
+// the turn already moved on) could move the companion out of turn order.
+static bool g_coopHostCombatTurnActive = false;
+
+// Host-side only: set by an incoming COOP_MSG_COMBAT_ACTION with actionType
+// == COOP_COMBAT_ACTION_END_TURN, read and cleared by coopnet_combat_input().
+static bool g_coopHostCombatEndTurnRequested = false;
+
 // The tile we last commanded each synced object to run toward, so repeated
 // updates for a still-in-progress run don't keep cancelling and restarting
 // the animation. On the client side (coopnet_client_apply_position), a new
@@ -147,6 +230,18 @@ static uint32_t g_coopLastBroadcastTimeMs = 0;
 static uint32_t g_coopLastFollowCheckTimeMs = 0;
 static uint32_t g_coopLastHeartbeatSentTimeMs = 0;
 
+// coopnet_send_message()'s retry budget when send() reports the socket
+// buffer is full (EWOULDBLOCK) -- confirmed via testing this is a real risk
+// during combat specifically: exploration mode's message volume (small,
+// infrequent -- a broadcast every 100ms, or one message per discrete click)
+// never came close to filling a TCP send buffer, but combat introduces much
+// tighter send/receive timing between host and client. Without a bound
+// here, a peer that's briefly slow to drain its socket turns this into an
+// unbounded busy-spin that never yields back to the OS message pump --
+// exactly what an "Application (Not Responding)" hang looks like, and
+// confirmed to reproduce this way during combat testing.
+const uint32_t kCoopSendTimeoutMs = 2000;
+
 // NOTE: deliberately very generous for now while the engine's background-focus
 // behavior (see GNW95_lost_focus) is still being made fully reliable during
 // coop sessions. Tighten this back down once that's solid.
@@ -155,6 +250,51 @@ const uint32_t kCoopHeartbeatIntervalMs = 2000;
 const uint32_t kCoopBroadcastIntervalMs = 100;
 const uint32_t kCoopFollowCheckIntervalMs = 1500;
 const int kCoopFollowDistanceThreshold = 3;
+
+// Briefly disabled during testing over a suspected memory-corruption symptom
+// (a garbage-looking name in the examine log) -- turned out to be a red
+// herring, that was just the host's own custom character name ("retard").
+// The real bug found in the same session, floating stray item sprites, was
+// fixed properly (see coopnet_apply_companion_inventory()'s use of
+// obj_inven_free()), so this is back on.
+const bool kCoopCompanionInventorySyncEnabled = true;
+
+// The companion's animation/action queue (anim.cc's register_begin/_end
+// sequences) is not safe to have two in-flight requests on the same object
+// at once -- confirmed via testing: sending several COOP_MSG_PICKUP_REQUESTs
+// back-to-back (e.g. clicking through a pile of several dropped items) let
+// the host receive and dispatch all of them in the same poll tick, each
+// calling action_get_an_object() on the companion before the previous one's
+// queued sequence had actually run, which silently dropped some of the
+// pickups (the client's debug log showed a PICKUP_REQUEST sent with no
+// matching ITEM_PICKED_UP ever coming back) even though a "trying to pick
+// up" animation was still visibly playing. Host-side requests -- pickup and
+// (later) use-scenery alike, since both drive the same companion action
+// queue -- are queued and dispatched one at a time instead, through one
+// shared queue so the two kinds can't race each other either.
+enum CoopCompanionActionKind {
+    COOP_COMPANION_ACTION_PICKUP,
+    COOP_COMPANION_ACTION_USE,
+};
+
+struct CoopCompanionActionRequest {
+    CoopCompanionActionKind kind;
+    CoopItemEvent target;
+};
+
+const int kCoopActionQueueCapacity = 16;
+static CoopCompanionActionRequest g_coopActionQueue[kCoopActionQueueCapacity];
+static int g_coopActionQueueHead = 0;
+static int g_coopActionQueueLen = 0;
+static bool g_coopCompanionActionBusy = false;
+static uint32_t g_coopCompanionActionStartMs = 0;
+
+// Safety net only -- cleared normally as soon as the companion's action
+// actually succeeds (coopnet_notify_item_picked_up() for pickups; use
+// requests have no completion signal yet, see coopnet_host_process_action_queue).
+// Covers the case where the target can't actually be reached/used at all
+// (unreachable path, already gone), which has no other completion signal.
+const uint32_t kCoopCompanionActionTimeoutMs = 3000;
 
 // ---------------------------------------------------------------------------
 // Platform socket helpers
@@ -236,10 +376,18 @@ static bool coopnet_send_message(CoopSocket sock, uint8_t type, const void* payl
 
     int total = sizeof(header) + payloadLen;
     int sent = 0;
+    uint32_t startMs = coopnet_now_ms();
     while (sent < total) {
         int rc = send(sock, reinterpret_cast<const char*>(buf) + sent, total - sent, 0);
         if (rc <= 0) {
             if (coopnet_would_block()) {
+                if (coopnet_now_ms() - startMs > kCoopSendTimeoutMs) {
+                    debug_printf("\nCoop: send() timed out (buffer never drained), dropping message type=%d\n", type);
+                    return false;
+                }
+                // Yield instead of busy-spinning -- see kCoopSendTimeoutMs's
+                // comment for why an unbounded retry here is dangerous.
+                SDL_Delay(1);
                 continue;
             }
             return false;
@@ -539,6 +687,14 @@ static void coopnet_host_apply_move_intent(const CoopMoveIntent& intent)
         return;
     }
 
+    if (isInCombat()) {
+        // Combat movement must go through coopnet_combat_input()'s
+        // turn-gated COOP_MSG_COMBAT_ACTION path instead -- applying a plain
+        // move-intent here would let the client move the companion for
+        // free, out of turn order.
+        return;
+    }
+
     if (g_coopLastCommandedTile[0] == intent.targetTile) {
         // Already heading there (e.g. a repeated click while still running
         // toward the same spot) — don't restart the animation for nothing.
@@ -557,6 +713,44 @@ static void coopnet_host_apply_move_intent(const CoopMoveIntent& intent)
     register_object_run_to_tile(g_coopCompanion, intent.targetTile, g_coopCompanion->elevation, -1, 0);
     register_end();
     g_coopLastCommandedTile[0] = intent.targetTile;
+}
+
+// Host-side only: applies a COOP_MSG_COMBAT_ACTION move during the
+// companion's own combat turn -- see g_coopHostCombatTurnActive's comment
+// for why this is only ever called while that's true. AP-gated the same way
+// combat_ai()'s own movement is (e.g. action_get_an_object()'s isInCombat()
+// branch passes the mover's current combat.ap as the budget) -- the
+// underlying register_object_move_to_tile() deducts consumed AP internally.
+static void coopnet_host_apply_combat_move(int targetTile)
+{
+    if (g_coopCompanion == NULL) {
+        return;
+    }
+
+    register_clear(g_coopCompanion);
+    register_begin(ANIMATION_REQUEST_RESERVED);
+    register_object_move_to_tile(g_coopCompanion, targetTile, g_coopCompanion->elevation, g_coopCompanion->data.critter.combat.ap, 0);
+    register_end();
+}
+
+// Host-side only: applies a COOP_MSG_COMBAT_ACTION attack during the
+// companion's own combat turn. No client-side enemy targeting UI exists yet
+// (needs participant mirroring, not yet built), so this reuses combat_ai()
+// -- the same function that drives a full AI-controlled turn elsewhere in
+// combat_turn() -- letting it pick a sensible target (ai_danger_source())
+// and handle moving into range + attacking with whatever AP the companion
+// has left. This means one press hands the rest of the turn's decisions to
+// the AI rather than queuing a single discrete attack; acceptable for this
+// phase (auto-target, per the original milestone-3 plan) -- real
+// player-chosen targeting is a later phase once the client can actually see
+// synced enemies.
+static void coopnet_host_apply_combat_attack()
+{
+    if (g_coopCompanion == NULL) {
+        return;
+    }
+
+    combat_ai(g_coopCompanion, NULL);
 }
 
 static void coopnet_host_broadcast_positions()
@@ -578,6 +772,34 @@ static void coopnet_host_broadcast_positions()
         pos.rotation = obj_dude->rotation;
         coopnet_send_message(g_coopPeerSocket, COOP_MSG_POSITION, &pos, sizeof(pos));
     }
+}
+
+// Host-side only: sends a full snapshot of the companion's current inventory
+// -- see the CoopInventorySync comment above for why this exists and why
+// it's a full snapshot rather than a diff.
+static void coopnet_host_broadcast_companion_inventory()
+{
+    if (g_coopCompanion == NULL) {
+        return;
+    }
+
+    Inventory* inventory = &(g_coopCompanion->data.inventory);
+
+    CoopInventorySync sync;
+    int count = inventory->length;
+    if (count > kCoopMaxInventorySyncItems) {
+        debug_printf("\nCoop: companion inventory has %d items, only syncing first %d\n", count, kCoopMaxInventorySyncItems);
+        count = kCoopMaxInventorySyncItems;
+    }
+
+    sync.itemCount = static_cast<uint8_t>(count);
+    for (int i = 0; i < count; i++) {
+        sync.items[i].pid = inventory->items[i].item->pid;
+        sync.items[i].quantity = inventory->items[i].quantity;
+    }
+
+    bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_COMPANION_INVENTORY, &sync, sizeof(sync));
+    debug_printf("\nCoop: broadcast companion inventory (%d items) success=%d\n", count, sent);
 }
 
 // Crude placeholder follow-AI used only while no client is connected, so the
@@ -610,6 +832,14 @@ static void coopnet_host_run_disconnected_follow()
 
 // Shared by both host and client: applying a peer's item drop/pickup to our
 // own world. See the (pid, tile, elevation)-identity caveat in coopnet.h.
+//
+// Both call tile_refresh_display() (a full-viewport redraw) on top of the
+// normal per-rect refresh -- confirmed via testing that the narrow rect
+// refresh alone could leave a stale "ghost" copy of the item's sprite
+// on screen (especially right around a camera scroll), the same class of
+// partial-redraw artifact already seen with companion movement. Item events
+// are rare (not a 10x/second path like position broadcasts), so the extra
+// cost of a full redraw here is not worth optimizing away.
 
 static void coopnet_apply_item_dropped(const CoopItemEvent& evt)
 {
@@ -622,6 +852,7 @@ static void coopnet_apply_item_dropped(const CoopItemEvent& evt)
     Rect rect;
     obj_connect(item, evt.tile, evt.elevation, &rect);
     tile_refresh_rect(&rect, evt.elevation);
+    tile_refresh_display();
 }
 
 static void coopnet_apply_item_picked_up(const CoopItemEvent& evt)
@@ -629,11 +860,130 @@ static void coopnet_apply_item_picked_up(const CoopItemEvent& evt)
     for (Object* object = obj_find_first_at(evt.elevation); object != NULL; object = obj_find_next_at()) {
         if (object->tile == evt.tile && object->pid == evt.pid) {
             obj_destroy(object);
+            tile_refresh_display();
             return;
         }
     }
 
     debug_printf("\nCoop: item pickup notification had no matching ground item (pid=%d, tile=%d)\n", evt.pid, evt.tile);
+}
+
+// Client-side only: replaces the client's local companion mirror's inventory
+// wholesale with the host's snapshot. A full clear-then-rebuild rather than
+// an in-place diff -- simpler and can't drift.
+//
+// The clear step uses obj_inven_free(), the same utility the engine itself
+// uses to tear down a critter's/container's whole inventory (e.g. on
+// destruction) -- an earlier version of this hand-rolled the clear with
+// item_remove_mult()+obj_erase_object() per item instead, which is what
+// produced the floating stray item sprites seen during testing (dropping an
+// item, or having one arrive via a stale/overlapping sync, left a corrupted
+// object behind instead of being cleanly freed).
+static void coopnet_apply_companion_inventory(const CoopInventorySync& sync)
+{
+    if (g_coopCompanion == NULL) {
+        return;
+    }
+
+    Inventory* inventory = &(g_coopCompanion->data.inventory);
+    obj_inven_free(inventory);
+
+    for (int i = 0; i < sync.itemCount; i++) {
+        Object* newItem = NULL;
+        if (obj_pid_new(&newItem, sync.items[i].pid) == -1) {
+            debug_printf("\nCoop: obj_pid_new failed applying companion inventory sync (pid=%d)\n", sync.items[i].pid);
+            continue;
+        }
+        item_add_force(g_coopCompanion, newItem, sync.items[i].quantity);
+    }
+
+    debug_printf("\nCoop: applied companion inventory sync (%d items)\n", sync.itemCount);
+}
+
+// Host-side only: enqueues a client's action request (pickup or use) rather
+// than applying it immediately -- see the g_coopActionQueue comment above for
+// why.
+static void coopnet_enqueue_companion_action(CoopCompanionActionKind kind, const CoopItemEvent& evt)
+{
+    if (g_coopActionQueueLen >= kCoopActionQueueCapacity) {
+        debug_printf("\nCoop: companion action queue full, dropping request (kind=%d, pid=%d, tile=%d)\n", kind, evt.pid, evt.tile);
+        return;
+    }
+
+    int tail = (g_coopActionQueueHead + g_coopActionQueueLen) % kCoopActionQueueCapacity;
+    g_coopActionQueue[tail].kind = kind;
+    g_coopActionQueue[tail].target = evt;
+    g_coopActionQueueLen++;
+}
+
+// Host-side only, called once per poll tick: dispatches at most one queued
+// action request, running the real action (movement-to-target, animation,
+// is_next_to check) against the authoritative companion object -- the same
+// action_get_an_object()/action_use_an_object() paths vanilla uses for
+// obj_dude's own clicks.
+//
+// For pickups, obj_pickup's existing coopnet_notify_item_picked_up() hook
+// broadcasts completion back to the client as a normal COOP_MSG_ITEM_PICKED_UP
+// (applied via coopnet_apply_item_picked_up like any other peer pickup), and
+// also clears g_coopCompanionActionBusy so the next queued request can start
+// right away.
+//
+// For use-scenery (e.g. doors), there is no such hook yet -- the companion
+// will genuinely open the door on the host's authoritative world, but that
+// doesn't yet get broadcast back to update the client's own independently-
+// loaded copy of the same door object. g_coopCompanionActionBusy for a use
+// request is only ever cleared by the safety timeout below. Known limitation,
+// not silently worked around -- full scenery-state sync is a separate piece
+// of work, same category as the general "simulation divergence" limitation
+// documented for exploration mode.
+static void coopnet_host_process_action_queue()
+{
+    if (g_coopHostCombatTurnActive) {
+        // Pickup/use actions (action_get_an_object()/action_use_an_object())
+        // and the companion's real combat turn both drive the companion's
+        // shared register_begin()/register_end() animation queue -- Phase 2
+        // of milestone 3 never accounted for the two interleaving. Left
+        // queued rather than dropped: it'll dispatch once combat frees the
+        // companion up again.
+        return;
+    }
+
+    if (g_coopCompanionActionBusy) {
+        if (coopnet_now_ms() - g_coopCompanionActionStartMs > kCoopCompanionActionTimeoutMs) {
+            debug_printf("\nCoop: companion action timed out without completing (never reached target / never got picked up)\n");
+            g_coopCompanionActionBusy = false;
+        } else {
+            return;
+        }
+    }
+
+    if (g_coopActionQueueLen == 0 || g_coopCompanion == NULL) {
+        return;
+    }
+
+    CoopCompanionActionRequest request = g_coopActionQueue[g_coopActionQueueHead];
+    g_coopActionQueueHead = (g_coopActionQueueHead + 1) % kCoopActionQueueCapacity;
+    g_coopActionQueueLen--;
+
+    const CoopItemEvent& evt = request.target;
+    int wantType = (request.kind == COOP_COMPANION_ACTION_PICKUP) ? OBJ_TYPE_ITEM : OBJ_TYPE_SCENERY;
+
+    for (Object* object = obj_find_first_at(evt.elevation); object != NULL; object = obj_find_next_at()) {
+        if (object->tile == evt.tile && object->pid == evt.pid && FID_TYPE(object->fid) == wantType) {
+            debug_printf("\nCoop: dispatching companion action kind=%d, companion tile=%d elevation=%d, target tile=%d elevation=%d, dist=%d\n",
+                request.kind, g_coopCompanion->tile, g_coopCompanion->elevation, object->tile, object->elevation, obj_dist(g_coopCompanion, object));
+            g_coopCompanionActionBusy = true;
+            g_coopCompanionActionStartMs = coopnet_now_ms();
+            if (request.kind == COOP_COMPANION_ACTION_PICKUP) {
+                action_get_an_object(g_coopCompanion, object);
+            } else {
+                action_use_an_object(g_coopCompanion, object);
+            }
+            return;
+        }
+    }
+
+    debug_printf("\nCoop: queued companion action had no matching target (kind=%d, pid=%d, tile=%d)\n", request.kind, evt.pid, evt.tile);
 }
 
 static void coopnet_poll_host()
@@ -678,6 +1028,12 @@ static void coopnet_poll_host()
                 g_coopLastRecvTimeMs = coopnet_now_ms();
                 g_coopLastBroadcastTimeMs = coopnet_now_ms();
 
+                // So a reconnecting/late-joining client immediately sees
+                // whatever the companion already has, not just future changes.
+                if (kCoopCompanionInventorySyncEnabled) {
+                    coopnet_host_broadcast_companion_inventory();
+                }
+
                 win_msg("Client connected!", 100, 100, 0);
             }
         }
@@ -706,12 +1062,45 @@ static void coopnet_poll_host()
                 memcpy(&evt, payload, sizeof(evt));
                 debug_printf("\nCoop: received ITEM_PICKED_UP from client (pid=%d, tile=%d)\n", evt.pid, evt.tile);
                 coopnet_apply_item_picked_up(evt);
+            } else if (type == COOP_MSG_PICKUP_REQUEST && payloadLen == sizeof(CoopItemEvent)) {
+                CoopItemEvent evt;
+                memcpy(&evt, payload, sizeof(evt));
+                debug_printf("\nCoop: received PICKUP_REQUEST from client (pid=%d, tile=%d)\n", evt.pid, evt.tile);
+                coopnet_enqueue_companion_action(COOP_COMPANION_ACTION_PICKUP, evt);
+            } else if (type == COOP_MSG_USE_REQUEST && payloadLen == sizeof(CoopItemEvent)) {
+                CoopItemEvent evt;
+                memcpy(&evt, payload, sizeof(evt));
+                debug_printf("\nCoop: received USE_REQUEST from client (pid=%d, tile=%d)\n", evt.pid, evt.tile);
+                coopnet_enqueue_companion_action(COOP_COMPANION_ACTION_USE, evt);
+            } else if (type == COOP_MSG_COMBAT_ACTION && payloadLen == sizeof(CoopCombatAction)) {
+                if (!g_coopHostCombatTurnActive) {
+                    // Stray/late message outside the companion's actual
+                    // turn window -- see g_coopHostCombatTurnActive's comment.
+                    debug_printf("\nCoop: ignored COMBAT_ACTION, not the companion's turn\n");
+                } else {
+                    CoopCombatAction action;
+                    memcpy(&action, payload, sizeof(action));
+                    if (action.actionType == COOP_COMBAT_ACTION_MOVE) {
+                        debug_printf("\nCoop: received COMBAT_ACTION move targetTile=%d\n", action.targetTile);
+                        coopnet_host_apply_combat_move(action.targetTile);
+                    } else if (action.actionType == COOP_COMBAT_ACTION_END_TURN) {
+                        debug_printf("\nCoop: received COMBAT_ACTION end-turn\n");
+                        g_coopHostCombatEndTurnRequested = true;
+                    } else if (action.actionType == COOP_COMBAT_ACTION_ATTACK) {
+                        debug_printf("\nCoop: received COMBAT_ACTION attack\n");
+                        coopnet_host_apply_combat_attack();
+                    }
+                }
             }
         }
 
         uint32_t now = coopnet_now_ms();
         if (now - g_coopLastRecvTimeMs > kCoopHeartbeatTimeoutMs) {
             disconnected = true;
+        }
+
+        if (!disconnected) {
+            coopnet_host_process_action_queue();
         }
 
         if (!disconnected && now - g_coopLastBroadcastTimeMs >= kCoopBroadcastIntervalMs) {
@@ -747,10 +1136,18 @@ static void coopnet_client_apply_position(const CoopPosition& pos)
     }
 
     if (target->tile == pos.tile) {
-        // Already there — only rotation may have changed (e.g. turned in place).
-        Rect rect;
-        obj_set_rotation(target, pos.rotation, &rect);
-        tile_refresh_rect(&rect, pos.elevation);
+        // Already there. obj_set_rotation() unconditionally reassigns
+        // ->rotation and forces a redraw even when called with the value
+        // it's already set to -- confirmed via testing that doing this on
+        // every ~100ms broadcast, even while genuinely standing still,
+        // produced a visible stutter/glitch on the client (constant
+        // redraw fighting the object's own idle animation). Only touch it
+        // when the rotation actually changed (e.g. turned in place).
+        if (target->rotation != pos.rotation) {
+            Rect rect;
+            obj_set_rotation(target, pos.rotation, &rect);
+            tile_refresh_rect(&rect, pos.elevation);
+        }
         return;
     }
 
@@ -899,6 +1296,25 @@ static void coopnet_poll_client()
                 memcpy(&evt, payload, sizeof(evt));
                 debug_printf("\nCoop: received ITEM_PICKED_UP from host (pid=%d, tile=%d)\n", evt.pid, evt.tile);
                 coopnet_apply_item_picked_up(evt);
+            } else if (type == COOP_MSG_COMPANION_INVENTORY && payloadLen == sizeof(CoopInventorySync) && kCoopCompanionInventorySyncEnabled) {
+                CoopInventorySync sync;
+                memcpy(&sync, payload, sizeof(sync));
+                debug_printf("\nCoop: received COMPANION_INVENTORY from host (%d items)\n", sync.itemCount);
+                coopnet_apply_companion_inventory(sync);
+            } else if (type == COOP_MSG_COMBAT_TURN && payloadLen == sizeof(CoopCombatTurn)) {
+                CoopCombatTurn turn;
+                memcpy(&turn, payload, sizeof(turn));
+                g_coopClientCombatTurnActive = turn.actionPoints > 0;
+                debug_printf("\nCoop: received COMBAT_TURN ap=%d, myTurnActive=%d\n", turn.actionPoints, g_coopClientCombatTurnActive);
+            } else if (type == COOP_MSG_COMBAT_BEGIN) {
+                debug_printf("\nCoop: received COMBAT_BEGIN\n");
+                g_coopClientInCombat = true;
+                win_msg("Combat has started!", 100, 100, 0);
+            } else if (type == COOP_MSG_COMBAT_END) {
+                debug_printf("\nCoop: received COMBAT_END\n");
+                g_coopClientInCombat = false;
+                g_coopClientCombatTurnActive = false;
+                win_msg("Combat has ended.", 100, 100, 0);
             }
         }
 
@@ -943,6 +1359,75 @@ void coopnet_poll()
     }
 }
 
+// Host-side only, called from combat.cc's combat_turn() when a1 is the
+// companion and a client is connected: takes over the companion's combat
+// turn, driven over the network instead of local AI (combat_ai()) or local
+// player input (combat_input(), the obj_dude case). Mirrors combat_input()'s
+// shape -- a blocking loop pumping input until the turn ends -- but the
+// "input" here is COOP_MSG_COMBAT_ACTION messages drained by coopnet_poll()
+// instead of the keyboard/mouse. Movement only for now (milestone 3 plan,
+// phase 2) -- attacks are a later phase.
+void coopnet_combat_input(Object* companion)
+{
+    if (g_coopRole != CoopRole::Host) {
+        // Confirmed via testing: this must never run on the client. NPCs
+        // run independently/unsynced on each side (see the general
+        // "simulation divergence" limitation), so it's entirely possible
+        // for the client's own local, independent combat simulation to
+        // also reach the companion's turn in its own combat_list[] around
+        // the same time as the host's real combat. Without this guard,
+        // combat_turn()'s dispatch (see combat.cc) would call this on the
+        // client too, running a second, spurious copy of this blocking
+        // network loop -- the likely cause of a crash seen during testing
+        // right as the companion's turn began.
+        return;
+    }
+
+    if (!coopnet_is_connected()) {
+        return;
+    }
+
+    CoopCombatTurn turn;
+    turn.actionPoints = companion->data.critter.combat.ap;
+    coopnet_send_message(g_coopPeerSocket, COOP_MSG_COMBAT_TURN, &turn, sizeof(turn));
+    debug_printf("\nCoop: companion combat turn started, ap=%d\n", turn.actionPoints);
+
+    g_coopHostCombatTurnActive = true;
+    g_coopHostCombatEndTurnRequested = false;
+
+    while (true) {
+        sharedFpsLimiter.mark();
+
+        coopnet_poll();
+        process_bk();
+
+        if (companion->data.critter.combat.ap <= 0) {
+            break;
+        }
+        if (g_coopHostCombatEndTurnRequested) {
+            break;
+        }
+        if (!coopnet_is_connected()) {
+            break;
+        }
+        if (game_user_wants_to_quit != 0) {
+            break;
+        }
+
+        renderPresent();
+        sharedFpsLimiter.throttle();
+    }
+
+    g_coopHostCombatTurnActive = false;
+
+    if (coopnet_is_connected()) {
+        CoopCombatTurn endTurn;
+        endTurn.actionPoints = 0;
+        coopnet_send_message(g_coopPeerSocket, COOP_MSG_COMBAT_TURN, &endTurn, sizeof(endTurn));
+        debug_printf("\nCoop: companion combat turn ended\n");
+    }
+}
+
 void coopnet_on_client_click(int tile)
 {
     if (g_coopConnState != CoopConnState::Connected) {
@@ -954,6 +1439,80 @@ void coopnet_on_client_click(int tile)
     intent.targetTile = tile;
     bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_MOVE_INTENT, &intent, sizeof(intent));
     debug_printf("\nCoop: sent MOVE_INTENT targetTile=%d success=%d\n", tile, sent);
+}
+
+bool coopnet_is_companion_turn_active()
+{
+    return g_coopClientCombatTurnActive;
+}
+
+void coopnet_on_client_combat_move_click(int tile)
+{
+    if (g_coopConnState != CoopConnState::Connected) {
+        return;
+    }
+
+    CoopCombatAction action;
+    action.actionType = COOP_COMBAT_ACTION_MOVE;
+    action.targetTile = tile;
+    bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_COMBAT_ACTION, &action, sizeof(action));
+    debug_printf("\nCoop: sent COMBAT_ACTION move targetTile=%d success=%d\n", tile, sent);
+}
+
+void coopnet_on_client_end_turn()
+{
+    if (g_coopConnState != CoopConnState::Connected) {
+        return;
+    }
+
+    CoopCombatAction action;
+    action.actionType = COOP_COMBAT_ACTION_END_TURN;
+    action.targetTile = -1;
+    bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_COMBAT_ACTION, &action, sizeof(action));
+    debug_printf("\nCoop: sent COMBAT_ACTION end-turn success=%d\n", sent);
+}
+
+void coopnet_on_client_attack()
+{
+    if (g_coopConnState != CoopConnState::Connected) {
+        return;
+    }
+
+    CoopCombatAction action;
+    action.actionType = COOP_COMBAT_ACTION_ATTACK;
+    action.targetTile = -1;
+    bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_COMBAT_ACTION, &action, sizeof(action));
+    debug_printf("\nCoop: sent COMBAT_ACTION attack success=%d\n", sent);
+}
+
+void coopnet_on_client_pickup_click(int pid, int tile, int elevation)
+{
+    if (g_coopConnState != CoopConnState::Connected) {
+        debug_printf("\nCoop: pickup click on pid=%d tile=%d ignored, not connected (state=%d)\n", pid, tile, static_cast<int>(g_coopConnState));
+        return;
+    }
+
+    CoopItemEvent evt;
+    evt.pid = pid;
+    evt.tile = tile;
+    evt.elevation = elevation;
+    bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_PICKUP_REQUEST, &evt, sizeof(evt));
+    debug_printf("\nCoop: sent PICKUP_REQUEST pid=%d tile=%d success=%d\n", pid, tile, sent);
+}
+
+void coopnet_on_client_use_click(int pid, int tile, int elevation)
+{
+    if (g_coopConnState != CoopConnState::Connected) {
+        debug_printf("\nCoop: use click on pid=%d tile=%d ignored, not connected (state=%d)\n", pid, tile, static_cast<int>(g_coopConnState));
+        return;
+    }
+
+    CoopItemEvent evt;
+    evt.pid = pid;
+    evt.tile = tile;
+    evt.elevation = elevation;
+    bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_USE_REQUEST, &evt, sizeof(evt));
+    debug_printf("\nCoop: sent USE_REQUEST pid=%d tile=%d success=%d\n", pid, tile, sent);
 }
 
 void coopnet_notify_item_dropped(Object* critter, Object* item)
@@ -984,6 +1543,18 @@ void coopnet_notify_item_picked_up(Object* critter, Object* item)
         return;
     }
 
+    if (critter == g_coopCompanion) {
+        // Lets coopnet_host_process_action_queue() dispatch the next queued
+        // request right away instead of waiting out the safety timeout.
+        g_coopCompanionActionBusy = false;
+
+        if (g_coopRole == CoopRole::Host && kCoopCompanionInventorySyncEnabled) {
+            // item_add_mult() already ran by this point in obj_pickup(), so
+            // the companion's inventory already reflects this pickup.
+            coopnet_host_broadcast_companion_inventory();
+        }
+    }
+
     // Must be called with item->tile/elevation still valid, i.e. before
     // obj_pickup() calls obj_disconnect() (see protinst.cc).
     CoopItemEvent evt;
@@ -992,6 +1563,26 @@ void coopnet_notify_item_picked_up(Object* critter, Object* item)
     evt.elevation = item->elevation;
     bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_ITEM_PICKED_UP, &evt, sizeof(evt));
     debug_printf("\nCoop: notified peer of item pickup (pid=%d, tile=%d) success=%d\n", evt.pid, evt.tile, sent);
+}
+
+void coopnet_notify_combat_begin()
+{
+    if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected) {
+        return;
+    }
+
+    bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_COMBAT_BEGIN, NULL, 0);
+    debug_printf("\nCoop: notified peer combat began, success=%d\n", sent);
+}
+
+void coopnet_notify_combat_end()
+{
+    if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected) {
+        return;
+    }
+
+    bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_COMBAT_END, NULL, 0);
+    debug_printf("\nCoop: notified peer combat ended, success=%d\n", sent);
 }
 
 } // namespace fallout

@@ -556,6 +556,20 @@ int game_handle_input(int eventCode, bool isInCombatMode)
         }
         break;
     }
+    case KEY_RETURN:
+        // Coop client's combat "end turn" -- mirrors obj_dude's own
+        // KEY_RETURN -> combat_end() handling inside combat_input(), which
+        // only the host runs. The client isn't running that loop itself
+        // (the host is, via coopnet_combat_input(), while it's the
+        // companion's turn), so this just sends the request over the
+        // network instead; a no-op if it isn't currently the companion's
+        // turn. Deliberately not also gating on this process's own local
+        // isInCombat() -- see the identical note in gmouse.cc's move-click
+        // handling for why that's unreliable on the client.
+        if (coopnet_get_role() == CoopRole::Client && coopnet_is_companion_turn_active()) {
+            coopnet_on_client_end_turn();
+        }
+        break;
     case KEY_TAB:
         if (intface_is_enabled()
             && keys[SDL_SCANCODE_LALT] == 0
@@ -570,7 +584,16 @@ int game_handle_input(int eventCode, bool isInCombatMode)
         break;
     case KEY_UPPERCASE_A:
     case KEY_LOWERCASE_A:
-        if (intface_is_enabled()) {
+        // Coop client's combat "attack" -- the client never runs combat()
+        // locally at all (see its role guard in combat.cc), so this key is
+        // otherwise meaningless for it; repurposed to request an
+        // auto-targeted attack for the companion during its own turn. See
+        // coopnet_on_client_attack()'s comment for why it's auto-targeted.
+        if (coopnet_get_role() == CoopRole::Client) {
+            if (coopnet_is_companion_turn_active()) {
+                coopnet_on_client_attack();
+            }
+        } else if (intface_is_enabled()) {
             if (!isInCombatMode) {
                 combat(NULL);
             }

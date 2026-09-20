@@ -13,6 +13,7 @@
 #include "game/bmpdlog.h"
 #include "game/combat.h"
 #include "game/combatai.h"
+#include "game/coopnet.h"
 #include "game/critter.h"
 #include "game/display.h"
 #include "game/game.h"
@@ -387,6 +388,18 @@ static int inventry_msg_unload()
 // 0x462480
 void handle_inventory()
 {
+    if (coopnet_get_role() == CoopRole::Client) {
+        // "My own inventory" for a coop client means the companion's, not
+        // our local obj_dude -- which is just a network-mirrored visual, and
+        // whose position tracks the host, not us. Opening this normally
+        // (inven_dude left at obj_dude) is what made items dropped from
+        // here land next to the host instead of the companion.
+        Object* companion = coopnet_get_companion();
+        if (companion != NULL) {
+            inven_set_dude(companion, companion->pid);
+        }
+    }
+
     if (isInCombat()) {
         if (combat_whose_turn() != inven_dude) {
             return;

@@ -5,6 +5,7 @@
 
 #include "game/anim.h"
 #include "game/combat.h"
+#include "game/coopnet.h"
 #include "game/display.h"
 #include "game/editor.h"
 #include "game/endgame.h"
@@ -182,6 +183,16 @@ char* critter_name(Object* critter)
 
     if (critter == obj_dude) {
         return pc_name;
+    }
+
+    if (critter == coopnet_get_companion()) {
+        // The companion has no script (see coopnet.h), so it would otherwise
+        // fall through below to proto_name(critter->pid) -- and since the
+        // companion deliberately reuses obj_dude's own pid as its spawn
+        // template, that would show the same generic proto name as the
+        // player's own character instead of a distinct one.
+        static char companionName[] = "Companion";
+        return companionName;
     }
 
     if (critter->field_80 == -1) {

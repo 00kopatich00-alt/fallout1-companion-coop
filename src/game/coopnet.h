@@ -64,6 +64,25 @@ Object* coopnet_get_companion();
 // as a move-intent for the companion to the host.
 void coopnet_on_client_click(int tile);
 
+// Called from gmouse.cc when the local role is Client and the player clicks
+// to pick up a ground item: instead of picking it up with the client's own
+// (mirrored, non-authoritative) obj_dude -- which fights every frame with
+// the position-sync code also driving that same object, and was the cause
+// of obj_dude's visible appearance corrupting on pickup -- sends a pickup
+// request identifying the item by (pid, tile, elevation) for the host to
+// apply to the real, authoritative companion object.
+void coopnet_on_client_pickup_click(int pid, int tile, int elevation);
+
+// Called from gmouse.cc when the local role is Client and the player clicks
+// to use a piece of scenery (e.g. a door): sends a use request identifying
+// the target by (pid, tile, elevation) for the host to apply to the real,
+// authoritative companion object, same reasoning as the pickup click above.
+// NOTE: the resulting state change (e.g. a door opening) is only applied on
+// the host's own authoritative world -- it is not yet broadcast back to
+// update the client's independently-loaded copy of the same object. Known
+// limitation, see coopnet_host_process_action_queue() in coopnet.cc.
+void coopnet_on_client_use_click(int pid, int tile, int elevation);
+
 // Called from protinst.cc's obj_drop()/obj_pickup() right after they
 // succeed, for whichever object performed the action. No-ops unless
 // connected and `critter` is one of the two synced characters (obj_dude or
@@ -74,6 +93,49 @@ void coopnet_on_client_click(int tile);
 // in normal play.
 void coopnet_notify_item_dropped(Object* critter, Object* item);
 void coopnet_notify_item_picked_up(Object* critter, Object* item);
+
+// Called from combat.cc's combat_turn() (host-side only) when it's the
+// companion's turn in a synced combat and a client is connected: blocks
+// until the companion's turn is over (AP exhausted, client sends end-turn,
+// or a disconnect/timeout), driven by network messages instead of local AI
+// or local player input. Movement only for now -- see coopnet.cc for the
+// milestone-3 phasing.
+void coopnet_combat_input(Object* companion);
+
+// Client-side only: true while it's the companion's combat turn, per the
+// most recent COOP_MSG_COMBAT_TURN received. Used to gate gmouse.cc's click
+// handling and an end-turn key press between meaning something and being a
+// no-op.
+bool coopnet_is_companion_turn_active();
+
+// Called from gmouse.cc when the local role is Client, we're in a synced
+// combat, and it's the companion's turn: sends a move action instead of the
+// exploration-mode move-intent coopnet_on_client_click() sends. Ignored by
+// the host outside of the companion's actual turn window.
+void coopnet_on_client_combat_move_click(int tile);
+
+// Called when the client wants to end the companion's combat turn early
+// (mirrors obj_dude's own KEY_RETURN behavior in combat_input()). No-op if
+// it isn't currently the companion's turn.
+void coopnet_on_client_end_turn();
+
+// Called when the client wants the companion to attack during its own
+// combat turn. No client-side enemy targeting UI yet -- the host picks the
+// target via combat_ai()'s own logic (see coopnet_host_apply_combat_attack()
+// in coopnet.cc). No-op if it isn't currently the companion's turn.
+void coopnet_on_client_attack();
+
+// Called from combat.cc's combat_begin()/combat_over() (host-side only, the
+// same real transition points vanilla itself uses) to let the client know a
+// synced combat has started/ended. Before this, the client's screen had no
+// idea combat was happening at all -- host and client's own NPCs run
+// independently/unsynced (see the general "simulation divergence"
+// limitation), so nothing else told the client. This does not yet sync
+// *what* the fight consists of (participants, enemy HP, etc.) -- just that
+// one is happening, which is enough for the client to understand why the
+// screen isn't responding to clicks except during the companion's own turn.
+void coopnet_notify_combat_begin();
+void coopnet_notify_combat_end();
 
 } // namespace fallout
 

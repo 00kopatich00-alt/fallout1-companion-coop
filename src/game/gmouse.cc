@@ -880,9 +880,28 @@ void gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                 // As a coop client, our own obj_dude is a network-mirrored
                 // visual only — send the click as a move-intent for the
                 // companion to the host instead of moving anything locally.
+                // During the companion's own combat turn, movement is
+                // turn-gated instead: route through the combat-action path.
+                // NOTE: deliberately checking coopnet_is_companion_turn_active()
+                // directly rather than this process's own local isInCombat()
+                // -- NPCs run independently/unsynced on each side (see the
+                // general "simulation divergence" limitation), so the
+                // client's own local combat_state essentially never reflects
+                // whether the host is actually in combat. Confirmed via
+                // testing: gating on local isInCombat() first meant a click
+                // during the companion's real (host-side) turn always fell
+                // through to a plain move-intent instead, which the host
+                // then correctly ignored (see coopnet_host_apply_move_intent())
+                // -- so the click just silently did nothing.
+                // coopnet_is_companion_turn_active() alone is already a
+                // reliable, network-synced signal and is sufficient on its own.
                 int tile = tile_num(mouseX, mouseY, map_elevation);
                 if (tile != -1) {
-                    coopnet_on_client_click(tile);
+                    if (coopnet_is_companion_turn_active()) {
+                        coopnet_on_client_combat_move_click(tile);
+                    } else {
+                        coopnet_on_client_click(tile);
+                    }
                 }
                 return;
             }
@@ -918,7 +937,16 @@ void gmouse_handle_event(int mouseX, int mouseY, int mouseState)
             if (target != NULL) {
                 switch (FID_TYPE(target->fid)) {
                 case OBJ_TYPE_ITEM:
-                    action_get_an_object(obj_dude, target);
+                    if (coopnet_get_role() == CoopRole::Client) {
+                        // As a coop client, our own obj_dude is a network-
+                        // mirrored visual only -- picking up locally with it
+                        // fights the position-sync code driving the same
+                        // object every frame. Send a pickup request for the
+                        // companion to the host instead (see coopnet.h).
+                        coopnet_on_client_pickup_click(target->pid, target->tile, target->elevation);
+                    } else {
+                        action_get_an_object(obj_dude, target);
+                    }
                     break;
                 case OBJ_TYPE_CRITTER:
                     if (target == obj_dude) {
@@ -944,7 +972,15 @@ void gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                     break;
                 case OBJ_TYPE_SCENERY:
                     if (proto_action_can_use(target->pid)) {
-                        action_use_an_object(obj_dude, target);
+                        if (coopnet_get_role() == CoopRole::Client) {
+                            // Same reasoning as the OBJ_TYPE_ITEM case above:
+                            // don't use scenery locally with our mirrored
+                            // obj_dude, send a use request for the companion
+                            // to the host instead (see coopnet.h).
+                            coopnet_on_client_use_click(target->pid, target->tile, target->elevation);
+                        } else {
+                            action_use_an_object(obj_dude, target);
+                        }
                     } else {
                         if (obj_examine(obj_dude, target) == -1) {
                             obj_look_at(obj_dude, target);
