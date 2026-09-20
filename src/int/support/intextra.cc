@@ -15,6 +15,7 @@
 #include "game/gconfig.h"
 #include "game/gdialog.h"
 #include "game/gmovie.h"
+#include "game/coopnet.h"
 #include "game/gsound.h"
 #include "game/intface.h"
 #include "game/item.h"
@@ -833,7 +834,41 @@ static void op_target_obj(Program* program)
 // 0x44C948
 static void op_dude_obj(Program* program)
 {
-    programStackPushPointer(program, obj_dude);
+    // DUDE_OBJ is how every compiled script asks "who is the player" --
+    // dialogue, quest checks, item logic, and (critically) a hostile
+    // creature's own periodic combat-perception check via its
+    // SCRIPT_PROC_COMBAT procedure, which typically measures its distance
+    // to whatever this returns to decide whether to attack. Always
+    // returning obj_dude meant creatures could never perceive the coop
+    // companion as a target no matter how close it got -- confirmed via
+    // testing (a rat left alone with only the companion nearby never
+    // reacted at all, no combat() call, nothing).
+    //
+    // Deliberately scoped to only the SCRIPT_PROC_COMBAT case (via the
+    // calling script's own ->action field, set by exec_script_proc() right
+    // before running that specific procedure) rather than changing DUDE_OBJ
+    // globally -- DUDE_OBJ is used far too pervasively (dialogue, quests,
+    // reputation, item checks) to safely redirect everywhere without a much
+    // larger, harder-to-verify audit of every call site. Sneak-related
+    // player checks are untouched, since those don't run via
+    // SCRIPT_PROC_COMBAT.
+    Object* result = obj_dude;
+
+    Object* companion = coopnet_get_companion();
+    if (companion != NULL) {
+        int sid = scr_find_sid_from_program(program);
+        Script* script;
+        if (scr_ptr(sid, &script) != -1 && script->action == SCRIPT_PROC_COMBAT) {
+            Object* self = script->owner;
+            if (self != NULL && obj_dist(self, companion) < obj_dist(self, obj_dude)) {
+                result = companion;
+                debug_printf("\nCoop-debug: DUDE_OBJ substituted companion for critter pid=%d during SCRIPT_PROC_COMBAT (distToCompanion=%d, distToDude=%d)\n",
+                    self->pid, obj_dist(self, companion), obj_dist(self, obj_dude));
+            }
+        }
+    }
+
+    programStackPushPointer(program, result);
 }
 
 // NOTE: The implementation is the same as in [op_target_obj].
