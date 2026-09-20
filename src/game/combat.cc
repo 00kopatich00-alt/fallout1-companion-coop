@@ -8,6 +8,7 @@
 #include "game/anim.h"
 #include "game/art.h"
 #include "game/combatai.h"
+#include "game/coopnet.h"
 #include "game/critter.h"
 #include "game/display.h"
 #include "game/elevator.h"
@@ -1768,6 +1769,8 @@ static void combat_begin(Object* a1)
         combat_begin_extra(a1);
         intface_end_window_open(true);
         gmouse_enable_scrolling();
+
+        coopnet_notify_combat_begin();
     }
 }
 
@@ -1855,6 +1858,8 @@ static void combat_over()
             }
         }
     }
+
+    coopnet_notify_combat_end();
 }
 
 // 0x4200A8
@@ -2132,6 +2137,7 @@ void combat_turn_run()
     while (combat_turn_running > 0) {
         sharedFpsLimiter.mark();
 
+        coopnet_poll();
         process_bk();
 
         renderPresent();
@@ -2146,6 +2152,8 @@ static int combat_input()
 
     while ((combat_state & COMBAT_STATE_0x02) != 0) {
         sharedFpsLimiter.mark();
+
+        coopnet_poll();
 
         if ((combat_state & COMBAT_STATE_0x08) != 0) {
             break;
@@ -2296,7 +2304,21 @@ static int combat_turn(Object* a1, bool a2)
                     tile_refresh_rect(&rect, a1->elevation);
                 }
 
-                combat_ai(a1, gcsd != NULL ? gcsd->defender : NULL);
+                // Host-only: on the client, NPCs (and hence whatever
+                // combat the client's own local simulation independently
+                // enters) run unsynced from the host's real combat -- if
+                // the client's own local sim ever reaches "the companion's"
+                // turn in its own combat_list[], that's not a turn that
+                // matters to the coop session at all, so just let it fall
+                // through to normal AI like any other combatant rather than
+                // calling into the host-only network loop (see
+                // coopnet_combat_input()'s own guard for why that would be
+                // unsafe to run on the client).
+                if (a1 == coopnet_get_companion() && coopnet_get_role() == CoopRole::Host && coopnet_is_connected()) {
+                    coopnet_combat_input(a1);
+                } else {
+                    combat_ai(a1, gcsd != NULL ? gcsd->defender : NULL);
+                }
             }
         }
 
@@ -2376,6 +2398,25 @@ static bool combat_should_end()
 // 0x420B20
 void combat(STRUCT_664980* attack)
 {
+    if (coopnet_get_role() == CoopRole::Client) {
+        // The coop client must never run its own independent combat
+        // simulation. NPCs are otherwise fully unsynced between host and
+        // client (see the general "simulation divergence" limitation), so
+        // letting the client's own local AI/scripts trigger combat() here
+        // meant the client fought its own separate copy of "the same"
+        // enemy, with its own separate outcome -- confirmed via testing:
+        // the client got its own kill message and XP for a creature the
+        // host was simultaneously fighting in the real, synced combat, and
+        // the client's own combat interface bar lit up independently. The
+        // real fight is entirely host-authoritative -- the client just
+        // watches it via coopnet_notify_combat_begin()/_end() and moves the
+        // companion during its turn via coopnet_combat_input(). All of
+        // combat()'s callers are void calls (KEY_UPPERCASE_A in game.cc, the
+        // attack button in intface.cc, script-triggered combat in
+        // scripts.cc), so a no-op return here is safe everywhere.
+        return;
+    }
+
     if (attack == NULL
         || (attack->attacker == NULL || attack->attacker->elevation == map_elevation)
         || (attack->defender == NULL || attack->defender->elevation == map_elevation)) {
