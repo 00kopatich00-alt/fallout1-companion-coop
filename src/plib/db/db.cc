@@ -1752,6 +1752,74 @@ int db_get_file_list(const char* filespec, char*** filelist, char*** desclist, i
     return count;
 }
 
+// Dev tooling additions (see db.h) -----------------------------------------
+
+int db_dump_list_dirs(char*** dirlist)
+{
+    if (current_database == NULL || dirlist == NULL) {
+        return 0;
+    }
+
+    int count = current_database->root.size;
+    if (count <= 0) {
+        *dirlist = NULL;
+        return 0;
+    }
+
+    *dirlist = (char**)internal_malloc(sizeof(char*) * count);
+    for (int i = 0; i < count; i++) {
+        (*dirlist)[i] = internal_strdup(current_database->root.list[i].name);
+    }
+
+    return count;
+}
+
+int db_dump_list_files(const char* dirname, char*** filelist, dir_entry** entriesOut)
+{
+    if (current_database == NULL || dirname == NULL || filelist == NULL) {
+        return 0;
+    }
+
+    int dirIndex = assoc_search(&(current_database->root), dirname);
+    if (dirIndex == -1) {
+        return 0;
+    }
+
+    assoc_array* dir = &(current_database->entries[dirIndex]);
+    int count = dir->size;
+    if (count <= 0) {
+        *filelist = NULL;
+        return 0;
+    }
+
+    *filelist = (char**)internal_malloc(sizeof(char*) * count);
+    if (entriesOut != NULL) {
+        *entriesOut = (dir_entry*)internal_malloc(sizeof(dir_entry) * count);
+    }
+
+    for (int i = 0; i < count; i++) {
+        (*filelist)[i] = internal_strdup(dir->list[i].name);
+        if (entriesOut != NULL) {
+            (*entriesOut)[i] = *((dir_entry*)dir->list[i].data);
+        }
+    }
+
+    return count;
+}
+
+void db_dump_free_list(char** list, int count)
+{
+    if (list == NULL) {
+        return;
+    }
+
+    for (int i = 0; i < count; i++) {
+        internal_free(list[i]);
+    }
+
+    internal_free(list);
+}
+
 // 0x4B1518
 void db_free_file_list(char*** file_list, char*** desclist)
 {

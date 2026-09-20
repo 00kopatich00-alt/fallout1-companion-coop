@@ -15,6 +15,7 @@
 
 #include "game/amutex.h"
 #include "game/art.h"
+#include "game/coopnet.h"
 #include "game/credits.h"
 #include "game/cycle.h"
 #include "game/endgame.h"
@@ -324,6 +325,8 @@ static void main_game_loop()
 
         int keyCode = get_input();
         game_handle_input(keyCode, false);
+
+        coopnet_poll();
 
         scripts_check_state();
 

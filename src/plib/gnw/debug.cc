@@ -55,7 +55,7 @@ void debug_register_mono()
 // 0x4B2DD8
 void debug_register_log(const char* fileName, const char* mode)
 {
-    if ((mode[0] == 'w' && mode[1] == 'a') && mode[1] == 't') {
+    if (mode[0] == 'w' && mode[1] == 't') {
         if (fd != NULL) {
             fclose(fd);
         }

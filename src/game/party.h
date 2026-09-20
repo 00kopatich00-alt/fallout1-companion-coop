@@ -18,6 +18,7 @@ void partyMemberClear();
 int partyMemberSyncPosition();
 int partyMemberRestingHeal(int a1);
 Object* partyMemberFindObjFromPid(int pid);
+Object* partyMemberFindObjFromPidStartingAt(int pid, int startIndex);
 bool isPartyMember(Object* object);
 int getPartyMemberCount();
 int partyMemberPrepItemSaveAll();
