@@ -2446,6 +2446,21 @@ void combat(STRUCT_664980* attack)
         return;
     }
 
+    // TEMP DEBUG (companion-only-fight investigation, remove once resolved):
+    // logs every call to combat(), the single entry point all fight-start
+    // triggers funnel through (player attack key, attack button,
+    // script-triggered AI aggression), so we can see whether a
+    // companion-only threat ever reaches this function at all.
+    if (attack != NULL) {
+        debug_printf("\nCoop-debug: combat() called, attacker=%s(pid=%d) defender=%s(pid=%d)\n",
+            attack->attacker == obj_dude ? "obj_dude" : (attack->attacker == coopnet_get_companion() ? "companion" : "other"),
+            attack->attacker != NULL ? attack->attacker->pid : -1,
+            attack->defender == obj_dude ? "obj_dude" : (attack->defender == coopnet_get_companion() ? "companion" : "other"),
+            attack->defender != NULL ? attack->defender->pid : -1);
+    } else {
+        debug_printf("\nCoop-debug: combat() called with attack=NULL\n");
+    }
+
     if (attack == NULL
         || (attack->attacker == NULL || attack->attacker->elevation == map_elevation)
         || (attack->defender == NULL || attack->defender->elevation == map_elevation)) {

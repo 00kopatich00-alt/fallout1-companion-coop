@@ -8,6 +8,7 @@
 #include "game/anim.h"
 #include "game/combat.h"
 #include "game/config.h"
+#include "game/coopnet.h"
 #include "game/critter.h"
 #include "game/display.h"
 #include "game/game.h"
@@ -1251,6 +1252,10 @@ Object* combat_ai(Object* critter, Object* target)
 // 0x425D20
 bool combatai_want_to_join(Object* a1)
 {
+    // TEMP DEBUG (companion-only-fight investigation, remove once resolved):
+    debug_printf("\nCoop-debug: combatai_want_to_join called for pid=%d tile=%d elevation=%d (obj_dude elevation=%d)\n",
+        a1->pid, a1->tile, a1->elevation, obj_dude->elevation);
+
     process_bk();
 
     if ((a1->flags & OBJECT_HIDDEN) != 0) {
@@ -1287,7 +1292,10 @@ bool combatai_want_to_join(Object* a1)
         return false;
     }
 
-    if (ai_danger_source(a1) == NULL) {
+    Object* dangerSource = ai_danger_source(a1);
+    debug_printf("\nCoop-debug: combatai_want_to_join pid=%d ai_danger_source=%s\n",
+        a1->pid, dangerSource == NULL ? "NULL" : (dangerSource == obj_dude ? "obj_dude" : (dangerSource == coopnet_get_companion() ? "companion" : "other")));
+    if (dangerSource == NULL) {
         return false;
     }
 
