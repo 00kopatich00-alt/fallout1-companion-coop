@@ -28,8 +28,10 @@ typedef int CoopSocket;
 #include "game/map.h"
 #include "game/object.h"
 #include "game/party.h"
+#include "game/protinst.h"
 #include "game/tile.h"
 #include "plib/gnw/debug.h"
+#include "plib/gnw/intrface.h"
 #include "plib/gnw/rect.h"
 
 namespace fallout {
@@ -51,6 +53,8 @@ enum CoopMsgType : uint8_t {
     COOP_MSG_MOVE_INTENT = 3, // client -> host, "walk companion to this tile"
     COOP_MSG_POSITION = 4, // host -> client, one object's authoritative position
     COOP_MSG_HEARTBEAT = 5, // either direction, keepalive
+    COOP_MSG_ITEM_DROPPED = 6, // either direction, an item appeared on the ground
+    COOP_MSG_ITEM_PICKED_UP = 7, // either direction, a ground item was picked up
 };
 
 const uint32_t kCoopProtocolVersion = 1;
@@ -76,6 +80,16 @@ struct CoopPosition {
     int32_t tile;
     int32_t elevation;
     int32_t rotation;
+};
+
+// Used for both COOP_MSG_ITEM_DROPPED and COOP_MSG_ITEM_PICKED_UP. Identifies
+// an item by (pid, tile, elevation) rather than a shared unique id — see the
+// caveat on coopnet_notify_item_dropped()/coopnet_notify_item_picked_up() in
+// coopnet.h.
+struct CoopItemEvent {
+    int32_t pid;
+    int32_t tile;
+    int32_t elevation;
 };
 
 #pragma pack(pop)
@@ -105,6 +119,25 @@ static CoopSocket g_coopListenSocket = COOP_INVALID_SOCKET;
 static CoopSocket g_coopPeerSocket = COOP_INVALID_SOCKET;
 
 static Object* g_coopCompanion = NULL;
+
+// The tile we last commanded each synced object to run toward, so repeated
+// updates for a still-in-progress run don't keep cancelling and restarting
+// the animation. On the client side (coopnet_client_apply_position), a new
+// run is only issued once the object has actually arrived at the previously
+// commanded tile — position updates arrive every ~100ms, and during
+// continuous movement the reported tile is almost always slightly different
+// each time (the host keeps walking), so reissuing on every reported change
+// restarted the run constantly, which looked like a stop-start "crippled"
+// gait even though it wasn't a hard jump (confirmed via testing; a
+// fixed-time throttle was tried before this and was still fragile).
+// register_object_run_to_tile can smoothly cover several tiles in one call,
+// so letting each run reach its actual destination before redirecting is
+// both simpler and exact. Host side (coopnet_host_apply_move_intent) reuses
+// index 0 for the companion, but redirects immediately on any new click
+// (matching vanilla's own interrupt-on-click behavior) rather than waiting
+// for arrival. Client side uses index 0/1 for companion/dude per received
+// CoopPosition.which. -1 = nothing commanded yet.
+static int g_coopLastCommandedTile[2] = { -1, -1 };
 
 static unsigned char g_coopRecvBuffer[4096];
 static int g_coopRecvBufferLen = 0;
@@ -428,6 +461,7 @@ bool coopnet_start_host(int port)
     g_coopRole = CoopRole::Host;
     g_coopConnState = CoopConnState::Listening;
     g_coopLastFollowCheckTimeMs = coopnet_now_ms();
+    g_coopLastCommandedTile[0] = -1;
 
     return true;
 }
@@ -466,6 +500,8 @@ bool coopnet_start_client(const char* ip, int port)
     g_coopConnState = CoopConnState::Connecting;
     g_coopRecvBufferLen = 0;
     g_coopCompanion = NULL;
+    g_coopLastCommandedTile[0] = -1;
+    g_coopLastCommandedTile[1] = -1;
 
     return true;
 }
@@ -478,6 +514,8 @@ void coopnet_shutdown()
     g_coopConnState = CoopConnState::Idle;
     g_coopCompanion = NULL;
     g_coopRecvBufferLen = 0;
+    g_coopLastCommandedTile[0] = -1;
+    g_coopLastCommandedTile[1] = -1;
 }
 
 CoopRole coopnet_get_role()
@@ -501,9 +539,24 @@ static void coopnet_host_apply_move_intent(const CoopMoveIntent& intent)
         return;
     }
 
+    if (g_coopLastCommandedTile[0] == intent.targetTile) {
+        // Already heading there (e.g. a repeated click while still running
+        // toward the same spot) — don't restart the animation for nothing.
+        return;
+    }
+
+    // Unlike the client's periodic position-apply (which waits for real
+    // arrival before redirecting — see coopnet_client_apply_position), a
+    // move-intent here represents a discrete, deliberate new click. Vanilla
+    // interrupts an in-progress walk immediately on a new click too (see
+    // check_move()'s register_clear(obj_dude) for "interrupt walk"), so this
+    // does the same rather than waiting — throttling it by time made the
+    // companion feel less responsive to clicks than the vanilla player.
+    register_clear(g_coopCompanion);
     register_begin(ANIMATION_REQUEST_UNRESERVED);
-    register_object_move_to_tile(g_coopCompanion, intent.targetTile, g_coopCompanion->elevation, -1, 0);
+    register_object_run_to_tile(g_coopCompanion, intent.targetTile, g_coopCompanion->elevation, -1, 0);
     register_end();
+    g_coopLastCommandedTile[0] = intent.targetTile;
 }
 
 static void coopnet_host_broadcast_positions()
@@ -548,10 +601,39 @@ static void coopnet_host_run_disconnected_follow()
 
     int distance = tile_dist(g_coopCompanion->tile, obj_dude->tile);
     if (distance > kCoopFollowDistanceThreshold) {
+        register_clear(g_coopCompanion);
         register_begin(ANIMATION_REQUEST_UNRESERVED);
-        register_object_move_to_tile(g_coopCompanion, obj_dude->tile, g_coopCompanion->elevation, -1, 0);
+        register_object_run_to_tile(g_coopCompanion, obj_dude->tile, g_coopCompanion->elevation, -1, 0);
         register_end();
     }
+}
+
+// Shared by both host and client: applying a peer's item drop/pickup to our
+// own world. See the (pid, tile, elevation)-identity caveat in coopnet.h.
+
+static void coopnet_apply_item_dropped(const CoopItemEvent& evt)
+{
+    Object* item = NULL;
+    if (obj_pid_new(&item, evt.pid) == -1) {
+        debug_printf("\nCoop: obj_pid_new failed applying item drop (pid=%d)\n", evt.pid);
+        return;
+    }
+
+    Rect rect;
+    obj_connect(item, evt.tile, evt.elevation, &rect);
+    tile_refresh_rect(&rect, evt.elevation);
+}
+
+static void coopnet_apply_item_picked_up(const CoopItemEvent& evt)
+{
+    for (Object* object = obj_find_first_at(evt.elevation); object != NULL; object = obj_find_next_at()) {
+        if (object->tile == evt.tile && object->pid == evt.pid) {
+            obj_destroy(object);
+            return;
+        }
+    }
+
+    debug_printf("\nCoop: item pickup notification had no matching ground item (pid=%d, tile=%d)\n", evt.pid, evt.tile);
 }
 
 static void coopnet_poll_host()
@@ -595,6 +677,8 @@ static void coopnet_poll_host()
                 g_coopConnState = CoopConnState::Connected;
                 g_coopLastRecvTimeMs = coopnet_now_ms();
                 g_coopLastBroadcastTimeMs = coopnet_now_ms();
+
+                win_msg("Client connected!", 100, 100, 0);
             }
         }
     }
@@ -612,6 +696,16 @@ static void coopnet_poll_host()
                 memcpy(&intent, payload, sizeof(intent));
                 debug_printf("\nCoop: received MOVE_INTENT targetTile=%d (companion=%p)\n", intent.targetTile, (void*)g_coopCompanion);
                 coopnet_host_apply_move_intent(intent);
+            } else if (type == COOP_MSG_ITEM_DROPPED && payloadLen == sizeof(CoopItemEvent)) {
+                CoopItemEvent evt;
+                memcpy(&evt, payload, sizeof(evt));
+                debug_printf("\nCoop: received ITEM_DROPPED from client (pid=%d, tile=%d)\n", evt.pid, evt.tile);
+                coopnet_apply_item_dropped(evt);
+            } else if (type == COOP_MSG_ITEM_PICKED_UP && payloadLen == sizeof(CoopItemEvent)) {
+                CoopItemEvent evt;
+                memcpy(&evt, payload, sizeof(evt));
+                debug_printf("\nCoop: received ITEM_PICKED_UP from client (pid=%d, tile=%d)\n", evt.pid, evt.tile);
+                coopnet_apply_item_picked_up(evt);
             }
         }
 
@@ -639,6 +733,12 @@ static void coopnet_poll_host()
     }
 }
 
+// Beyond this many tiles, animate a walk rather than instant-snapping is
+// implausible (elevation change, reconnect, catch-up after a stall) — just
+// snap. Within it, a real animated walk looks like natural movement instead
+// of a teleport.
+const int kCoopSnapDistanceThreshold = 8;
+
 static void coopnet_client_apply_position(const CoopPosition& pos)
 {
     Object* target = (pos.which == 0) ? g_coopCompanion : obj_dude;
@@ -646,14 +746,47 @@ static void coopnet_client_apply_position(const CoopPosition& pos)
         return;
     }
 
-    Rect rect;
-    obj_move_to_tile(target, pos.tile, pos.elevation, &rect);
-    obj_set_rotation(target, pos.rotation, &rect);
-    tile_refresh_rect(&rect, pos.elevation);
-
-    if (pos.which == 0) {
-        tile_scroll_to(target->tile, 2);
+    if (target->tile == pos.tile) {
+        // Already there — only rotation may have changed (e.g. turned in place).
+        Rect rect;
+        obj_set_rotation(target, pos.rotation, &rect);
+        tile_refresh_rect(&rect, pos.elevation);
+        return;
     }
+
+    if (target->elevation != pos.elevation || tile_dist(target->tile, pos.tile) > kCoopSnapDistanceThreshold) {
+        Rect rect;
+        obj_move_to_tile(target, pos.tile, pos.elevation, &rect);
+        obj_set_rotation(target, pos.rotation, &rect);
+        tile_refresh_rect(&rect, pos.elevation);
+        g_coopLastCommandedTile[pos.which] = pos.tile;
+        return;
+    }
+
+    if (g_coopLastCommandedTile[pos.which] == pos.tile) {
+        return;
+    }
+
+    // Don't interrupt a run that's still in progress toward the previously
+    // commanded tile — only issue a new command once the object has actually
+    // arrived there (or this is the very first command for it). A fixed-time
+    // throttle (reissue at most every N ms) was tried first, but the host
+    // keeps walking, so the reported tile is almost always slightly
+    // different every ~100ms broadcast regardless of the timer, and picking
+    // an interval that didn't sometimes cut a stride short or leave a gap
+    // was fragile — confirmed via testing it still produced an occasional
+    // stop-start "crippled" gait. Checking real arrival is exact instead of
+    // guessing a time window.
+    bool hasArrived = g_coopLastCommandedTile[pos.which] == -1 || target->tile == g_coopLastCommandedTile[pos.which];
+    if (!hasArrived) {
+        return;
+    }
+
+    register_clear(target);
+    register_begin(ANIMATION_REQUEST_UNRESERVED);
+    register_object_run_to_tile(target, pos.tile, pos.elevation, -1, 0);
+    register_end();
+    g_coopLastCommandedTile[pos.which] = pos.tile;
 }
 
 static void coopnet_poll_client()
@@ -715,6 +848,17 @@ static void coopnet_poll_client()
                     g_coopConnState = CoopConnState::Connected;
                     g_coopLastRecvTimeMs = coopnet_now_ms();
                     debug_printf("\nCoop: now Connected (companion=%p)\n", (void*)g_coopCompanion);
+
+                    // One-time instant camera snap onto the companion, the
+                    // character the client is meant to be playing as. After
+                    // this, normal camera controls (mouse-edge scroll, Home
+                    // key) take over — vanilla gameplay doesn't auto-scroll
+                    // on every step either, so neither does this.
+                    if (g_coopCompanion != NULL) {
+                        tile_set_center(g_coopCompanion->tile, TILE_SET_CENTER_REFRESH_WINDOW | TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS);
+                    }
+
+                    win_msg("Host connected!", 100, 100, 0);
                 }
             }
         }
@@ -745,6 +889,16 @@ static void coopnet_poll_client()
                     latestPos[pos.which] = pos;
                     havePos[pos.which] = true;
                 }
+            } else if (type == COOP_MSG_ITEM_DROPPED && payloadLen == sizeof(CoopItemEvent)) {
+                CoopItemEvent evt;
+                memcpy(&evt, payload, sizeof(evt));
+                debug_printf("\nCoop: received ITEM_DROPPED from host (pid=%d, tile=%d)\n", evt.pid, evt.tile);
+                coopnet_apply_item_dropped(evt);
+            } else if (type == COOP_MSG_ITEM_PICKED_UP && payloadLen == sizeof(CoopItemEvent)) {
+                CoopItemEvent evt;
+                memcpy(&evt, payload, sizeof(evt));
+                debug_printf("\nCoop: received ITEM_PICKED_UP from host (pid=%d, tile=%d)\n", evt.pid, evt.tile);
+                coopnet_apply_item_picked_up(evt);
             }
         }
 
@@ -800,6 +954,44 @@ void coopnet_on_client_click(int tile)
     intent.targetTile = tile;
     bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_MOVE_INTENT, &intent, sizeof(intent));
     debug_printf("\nCoop: sent MOVE_INTENT targetTile=%d success=%d\n", tile, sent);
+}
+
+void coopnet_notify_item_dropped(Object* critter, Object* item)
+{
+    if (g_coopConnState != CoopConnState::Connected) {
+        return;
+    }
+    if (item == NULL || (critter != obj_dude && critter != g_coopCompanion)) {
+        return;
+    }
+
+    // item->tile/elevation already reflect where it landed — obj_drop()
+    // calls obj_connect() before we're invoked (see protinst.cc).
+    CoopItemEvent evt;
+    evt.pid = item->pid;
+    evt.tile = item->tile;
+    evt.elevation = item->elevation;
+    bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_ITEM_DROPPED, &evt, sizeof(evt));
+    debug_printf("\nCoop: notified peer of item drop (pid=%d, tile=%d) success=%d\n", evt.pid, evt.tile, sent);
+}
+
+void coopnet_notify_item_picked_up(Object* critter, Object* item)
+{
+    if (g_coopConnState != CoopConnState::Connected) {
+        return;
+    }
+    if (item == NULL || (critter != obj_dude && critter != g_coopCompanion)) {
+        return;
+    }
+
+    // Must be called with item->tile/elevation still valid, i.e. before
+    // obj_pickup() calls obj_disconnect() (see protinst.cc).
+    CoopItemEvent evt;
+    evt.pid = item->pid;
+    evt.tile = item->tile;
+    evt.elevation = item->elevation;
+    bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_ITEM_PICKED_UP, &evt, sizeof(evt));
+    debug_printf("\nCoop: notified peer of item pickup (pid=%d, tile=%d) success=%d\n", evt.pid, evt.tile, sent);
 }
 
 } // namespace fallout

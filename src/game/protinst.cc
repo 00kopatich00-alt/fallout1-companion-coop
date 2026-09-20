@@ -6,6 +6,7 @@
 
 #include "game/anim.h"
 #include "game/combat.h"
+#include "game/coopnet.h"
 #include "game/critter.h"
 #include "game/display.h"
 #include "game/game.h"
@@ -503,6 +504,11 @@ int obj_pickup(Object* critter, Object* item)
         }
 
         if (rc == 0) {
+            // Must run before obj_disconnect() below, which invalidates
+            // item->tile/elevation — coopnet needs them to identify the
+            // ground item for the peer.
+            coopnet_notify_item_picked_up(critter, item);
+
             Rect rect;
             obj_disconnect(item, &rect);
             tile_refresh_rect(&rect, item->elevation);
@@ -604,6 +610,8 @@ int obj_drop(Object* a1, Object* a2)
         Rect updatedRect;
         obj_connect(a2, owner->tile, owner->elevation, &updatedRect);
         tile_refresh_rect(&updatedRect, owner->elevation);
+
+        coopnet_notify_item_dropped(a1, a2);
     }
 
     return 0;

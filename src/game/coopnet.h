@@ -64,6 +64,17 @@ Object* coopnet_get_companion();
 // as a move-intent for the companion to the host.
 void coopnet_on_client_click(int tile);
 
+// Called from protinst.cc's obj_drop()/obj_pickup() right after they
+// succeed, for whichever object performed the action. No-ops unless
+// connected and `critter` is one of the two synced characters (obj_dude or
+// the companion) — mirrors the change to the peer's world so both players
+// see the same ground items. Identifies items by (pid, tile, elevation)
+// rather than a shared unique id, so two identical items dropped on the
+// same tile could be ambiguous — a known limitation, not expected to matter
+// in normal play.
+void coopnet_notify_item_dropped(Object* critter, Object* item);
+void coopnet_notify_item_picked_up(Object* critter, Object* item);
+
 } // namespace fallout
 
 #endif /* FALLOUT_GAME_COOPNET_H_ */
