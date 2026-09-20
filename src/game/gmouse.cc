@@ -7,6 +7,7 @@
 #include "game/actions.h"
 #include "game/art.h"
 #include "game/combat.h"
+#include "game/coopnet.h"
 #include "game/critter.h"
 #include "game/game.h"
 #include "game/gconfig.h"
@@ -875,6 +876,17 @@ void gmouse_handle_event(int mouseX, int mouseY, int mouseState)
 
     if ((mouseState & MOUSE_EVENT_LEFT_BUTTON_UP) != 0) {
         if (gmouse_3d_current_mode == GAME_MOUSE_MODE_MOVE) {
+            if (coopnet_get_role() == CoopRole::Client) {
+                // As a coop client, our own obj_dude is a network-mirrored
+                // visual only — send the click as a move-intent for the
+                // companion to the host instead of moving anything locally.
+                int tile = tile_num(mouseX, mouseY, map_elevation);
+                if (tile != -1) {
+                    coopnet_on_client_click(tile);
+                }
+                return;
+            }
+
             int actionPoints;
             if (isInCombat()) {
                 actionPoints = combat_free_move + obj_dude->data.critter.combat.ap;

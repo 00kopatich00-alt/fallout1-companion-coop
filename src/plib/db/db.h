@@ -66,6 +66,12 @@ int db_fprintf(DB_FILE* stream, const char* format, ...);
 int db_feof(DB_FILE* stream);
 int db_get_file_list(const char* filespec, char*** filelist, char*** desclist, int desclen);
 void db_free_file_list(char*** file_list, char*** desclist);
+
+// Dev tooling additions: raw directory/file enumeration for inspecting DAT
+// archive contents (used by tools/datdump, not by the game itself).
+int db_dump_list_dirs(char*** dirlist);
+int db_dump_list_files(const char* dirname, char*** filelist, dir_entry** entriesOut);
+void db_dump_free_list(char** list, int count);
 long db_filelength(DB_FILE* stream);
 void db_register_mem(db_malloc_func* malloc_func, db_strdup_func* strdup_func, db_free_func* free_func);
 void db_register_callback(db_read_callback* callback, size_t threshold);

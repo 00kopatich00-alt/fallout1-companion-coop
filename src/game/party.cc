@@ -474,6 +474,26 @@ Object* partyMemberFindObjFromPid(int pid)
     return NULL;
 }
 
+// Like `partyMemberFindObjFromPid`, but starts searching at `startIndex`
+// instead of 0. Added for coop: index 0 is always `obj_dude`, so when the
+// coop companion is spawned as a copy of `obj_dude`'s own proto (sharing its
+// pid), searching from index 1 is required to find the companion rather than
+// obj_dude itself.
+Object* partyMemberFindObjFromPidStartingAt(int pid, int startIndex)
+{
+    int index;
+    Object* object;
+
+    for (index = startIndex; index < partyMemberCount; index++) {
+        object = partyMemberList[index].object;
+        if (object->pid == pid) {
+            return object;
+        }
+    }
+
+    return NULL;
+}
+
 // Returns `true` if specified object is a party member.
 //
 // 0x485AAC

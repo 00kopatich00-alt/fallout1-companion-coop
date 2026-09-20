@@ -62,6 +62,8 @@ target_sources(${EXECUTABLE_NAME} PUBLIC
     "src/game/combatai.h"
     "src/game/config.cc"
     "src/game/config.h"
+    "src/game/coopnet.cc"
+    "src/game/coopnet.h"
     "src/game/credits.cc"
     "src/game/credits.h"
     "src/game/critter.cc"
@@ -291,6 +293,7 @@ endif()
 if(WIN32)
     target_link_libraries(${EXECUTABLE_NAME}
         winmm
+        ws2_32
     )
 endif()
 
@@ -356,6 +359,20 @@ target_link_libraries(${EXECUTABLE_NAME} adecode::adecode)
 
 add_subdirectory("third_party/fpattern")
 target_link_libraries(${EXECUTABLE_NAME} fpattern::fpattern)
+
+# Dev tool: standalone DAT archive inspector (see tools/datdump).
+if(NOT ANDROID AND NOT IOS)
+    add_executable(datdump
+        "tools/datdump/main.cc"
+        "src/plib/db/db.cc"
+        "src/plib/db/lzss.cc"
+        "src/plib/assoc/assoc.cc"
+        "src/platform_compat.cc"
+    )
+    target_include_directories(datdump PRIVATE src ${SDL2_INCLUDE_DIRS})
+    target_link_libraries(datdump fpattern::fpattern ${SDL2_LIBRARIES})
+    set_target_properties(datdump PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED YES)
+endif()
 
 target_link_libraries(${EXECUTABLE_NAME} ${SDL2_LIBRARIES})
 target_include_directories(${EXECUTABLE_NAME} PRIVATE ${SDL2_INCLUDE_DIRS})

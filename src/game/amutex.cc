@@ -4,6 +4,8 @@
 #include <windows.h>
 #endif
 
+#include "game/coopnet.h"
+
 namespace fallout {
 
 #ifdef _WIN32
@@ -15,10 +17,12 @@ static HANDLE autorun_mutex;
 bool autorun_mutex_create()
 {
 #ifdef _WIN32
-    autorun_mutex = CreateMutexA(NULL, FALSE, "InterplayGenericAutorunMutex");
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        CloseHandle(autorun_mutex);
-        return false;
+    if (!coopnet_allow_multiple_instances()) {
+        autorun_mutex = CreateMutexA(NULL, FALSE, "InterplayGenericAutorunMutex");
+        if (GetLastError() == ERROR_ALREADY_EXISTS) {
+            CloseHandle(autorun_mutex);
+            return false;
+        }
     }
 #endif
 

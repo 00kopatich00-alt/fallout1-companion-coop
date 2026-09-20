@@ -4,6 +4,7 @@
 #include <stdio.h>
 
 #include "audio_engine.h"
+#include "game/coopnet.h"
 #include "platform_compat.h"
 #include "plib/color/color.h"
 #include "plib/gnw/button.h"
@@ -1209,11 +1210,29 @@ void GNW95_lost_focus()
         focus_func(0);
     }
 
-    while (!GNW95_isActive) {
-        GNW95_process_message();
+    // Vanilla behavior deliberately blocks the entire process (including any
+    // background simulation) while the window is unfocused, as a CPU-saving
+    // pause for single-player. That's incompatible with coop: whichever
+    // window is in the background would stop processing network traffic
+    // entirely, including heartbeats, causing the other side to wrongly
+    // time out the connection (confirmed via testing — this was the real
+    // cause of "one instance freezes" and eventual disconnects while
+    // alt-tabbing between two same-machine test instances).
+    //
+    // Skipping the block unconditionally in coop-debug mode also broke movie
+    // playback (confirmed via testing — both windows hung mid-movie), so this
+    // only skips it once an actual coop session has started (coopnet_get_role()
+    // != None, i.e. after F9). Before that point (intro movies, main menu,
+    // loading) vanilla blocking behavior is kept intact. Real two-machine play
+    // isn't affected either way, since each player's window stays focused on
+    // their own screen throughout.
+    if (!(coopnet_allow_multiple_instances() && coopnet_get_role() != CoopRole::None)) {
+        while (!GNW95_isActive) {
+            GNW95_process_message();
 
-        if (idle_func != NULL) {
-            idle_func();
+            if (idle_func != NULL) {
+                idle_func();
+            }
         }
     }
 

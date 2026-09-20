@@ -8,6 +8,7 @@
 #include <unistd.h>
 #endif
 
+#include "game/coopnet.h"
 #include "game/main.h"
 #include "plib/gnw/gnw.h"
 #include "plib/gnw/svga.h"
@@ -33,10 +34,14 @@ int main(int argc, char* argv[])
 {
     int rc;
 
+    coopnet_parse_command_line(argc, argv);
+
 #if _WIN32
-    GNW95_mutex = CreateMutexA(0, TRUE, "GNW95MUTEX");
-    if (GetLastError() != ERROR_SUCCESS) {
-        return 0;
+    if (!coopnet_allow_multiple_instances()) {
+        GNW95_mutex = CreateMutexA(0, TRUE, "GNW95MUTEX");
+        if (GetLastError() != ERROR_SUCCESS) {
+            return 0;
+        }
     }
 #endif
 
@@ -64,7 +69,9 @@ int main(int argc, char* argv[])
     rc = gnw_main(argc, argv);
 
 #if _WIN32
-    CloseHandle(GNW95_mutex);
+    if (GNW95_mutex != NULL) {
+        CloseHandle(GNW95_mutex);
+    }
 #endif
 
     return rc;

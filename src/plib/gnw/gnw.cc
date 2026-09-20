@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "game/coopnet.h"
 #include "game/palette.h"
 #include "plib/color/color.h"
 #include "plib/db/db.h"
@@ -1258,16 +1259,31 @@ void win_set_minimized_title(const char* title)
 
 #ifdef _WIN32
     if (GNW95_title_mutex == INVALID_HANDLE_VALUE) {
-        GNW95_title_mutex = CreateMutexA(NULL, TRUE, title);
-        if (GetLastError() != ERROR_SUCCESS) {
-            GNW95_already_running = true;
-            return;
+        if (coopnet_allow_multiple_instances()) {
+            // This mutex is keyed on the window title, which is the same for
+            // every copy of the game — give each process its own unique name
+            // instead so multiple coop-debug instances don't see each other
+            // as "already running", while still satisfying the non-NULL
+            // sentinel check below (WINDOW_MANAGER_ERR_TITLE_NOT_SET).
+            char uniqueTitleMutexName[300];
+            snprintf(uniqueTitleMutexName, sizeof(uniqueTitleMutexName), "%s-coop-%lu", title, static_cast<unsigned long>(GetCurrentProcessId()));
+            GNW95_title_mutex = CreateMutexA(NULL, TRUE, uniqueTitleMutexName);
+        } else {
+            GNW95_title_mutex = CreateMutexA(NULL, TRUE, title);
+            if (GetLastError() != ERROR_SUCCESS) {
+                GNW95_already_running = true;
+                return;
+            }
         }
     }
 #endif
 
-    strncpy(GNW95_title, title, 256);
-    GNW95_title[256 - 1] = '\0';
+    if (coopnet_allow_multiple_instances() && coopnet_get_instance_label()[0] != '\0') {
+        snprintf(GNW95_title, 256, "%s - %s", title, coopnet_get_instance_label());
+    } else {
+        strncpy(GNW95_title, title, 256);
+        GNW95_title[256 - 1] = '\0';
+    }
 
     if (gSdlWindow != nullptr) {
         SDL_SetWindowTitle(gSdlWindow, GNW95_title);
