@@ -120,10 +120,15 @@ void coopnet_on_client_combat_move_click(int tile);
 void coopnet_on_client_end_turn();
 
 // Called when the client wants the companion to attack during its own
-// combat turn. No client-side enemy targeting UI yet -- the host picks the
-// target via combat_ai()'s own logic (see coopnet_host_apply_combat_attack()
-// in coopnet.cc). No-op if it isn't currently the companion's turn.
-void coopnet_on_client_attack();
+// combat turn. Pass the specific enemy the player clicked on (a local
+// object that mirrors one of the host's combat participants, see
+// coopnet_apply_combat_participant() in coopnet.cc) to target it
+// specifically, or NULL to let the host's combat_ai() auto-target instead
+// (e.g. for the plain "A to attack" key with no click). Silently falls back
+// to auto-target host-side if `target` isn't a currently-tracked
+// participant (not a synced enemy at all, or it died before this round-
+// tripped). No-op if it isn't currently the companion's turn.
+void coopnet_on_client_attack(Object* target);
 
 // Called from combat.cc's combat_begin()/combat_over() (host-side only, the
 // same real transition points vanilla itself uses) to let the client know a

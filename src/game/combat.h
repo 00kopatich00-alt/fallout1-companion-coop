@@ -36,6 +36,14 @@ void combat_end();
 void combat_turn_run();
 void combat_end_turn();
 void combat(STRUCT_664980* attack);
+
+// Small read-only accessors onto the otherwise-file-static combat_list[] /
+// list_total, added for coopnet.cc to broadcast combat participants to the
+// client without needing to duplicate or expose the whole combat_list
+// machinery. Returns 0/NULL when not currently in combat or index is out of
+// range.
+int combat_get_list_count();
+Object* combat_get_list_item(int index);
 void combat_ctd_init(Attack* attack, Object* attacker, Object* defender, int hitMode, int hitLocation);
 int combat_attack(Object* a1, Object* a2, int hitMode, int location);
 int combat_bullet_start(const Object* a1, const Object* a2);

@@ -28,12 +28,14 @@ typedef int CoopSocket;
 #include "game/anim.h"
 #include "game/combat.h"
 #include "game/combatai.h"
+#include "game/critter.h"
 #include "game/game.h"
 #include "game/item.h"
 #include "game/map.h"
 #include "game/object.h"
 #include "game/party.h"
 #include "game/protinst.h"
+#include "game/stat.h"
 #include "game/tile.h"
 #include "plib/gnw/debug.h"
 #include "plib/gnw/input.h"
@@ -69,6 +71,7 @@ enum CoopMsgType : uint8_t {
     COOP_MSG_COMBAT_ACTION = 12, // client -> host, the companion's chosen combat action (move or end-turn for now)
     COOP_MSG_COMBAT_BEGIN = 13, // host -> client, a synced combat has started
     COOP_MSG_COMBAT_END = 14, // host -> client, the synced combat has ended
+    COOP_MSG_COMBAT_PARTICIPANT = 15, // host -> client, one combat participant's identity + current state
 };
 
 const uint32_t kCoopProtocolVersion = 1;
@@ -106,16 +109,37 @@ struct CoopCombatTurn {
 enum CoopCombatActionType : uint8_t {
     COOP_COMBAT_ACTION_MOVE = 0,
     COOP_COMBAT_ACTION_END_TURN = 1,
-    // "Attack" is auto-targeted for now, no client-side enemy targeting UI
-    // yet (that needs participant mirroring, not yet built) -- reuses
-    // combat_ai()'s own targeting/attack logic, see
-    // coopnet_host_apply_combat_attack().
+    // If targetId is a valid, currently-known participant id, attacks that
+    // specific participant (combat_attack() against the real host-side
+    // object it maps to). Otherwise (targetId == -1, or an id the host
+    // doesn't recognize -- e.g. it died before the click round-tripped)
+    // falls back to combat_ai()'s own auto-targeting, same as before
+    // participant mirroring existed.
     COOP_COMBAT_ACTION_ATTACK = 2,
 };
 
 struct CoopCombatAction {
     uint8_t actionType;
     int32_t targetTile; // valid when actionType == COOP_COMBAT_ACTION_MOVE
+    int32_t targetId; // valid when actionType == COOP_COMBAT_ACTION_ATTACK; -1 = auto-target
+};
+
+// Identifies a combat participant (an enemy, or an ally other than obj_dude/
+// the companion, which already have their own dedicated sync) by the host's
+// own Object::id -- a purely local, opaque token the client never needs to
+// interpret, just remember alongside whichever local object it associates
+// with that id (see g_coopParticipants) and echo back when the player
+// targets that enemy. Sent host -> client once per participant at combat
+// start and periodically (piggybacking on the same broadcast cadence as
+// COOP_MSG_POSITION) while that participant is still alive.
+struct CoopCombatParticipant {
+    int32_t id;
+    int32_t pid;
+    int32_t tile;
+    int32_t elevation;
+    int32_t rotation;
+    int32_t hp;
+    uint8_t isDead;
 };
 
 // Used for both COOP_MSG_ITEM_DROPPED and COOP_MSG_ITEM_PICKED_UP. Identifies
@@ -192,6 +216,29 @@ static bool g_coopClientCombatTurnActive = false;
 // one-time notification and avoid repeating it -- see coopnet_apply_combat_begin()/
 // coopnet_apply_combat_end().
 static bool g_coopClientInCombat = false;
+
+// Client-side only: maps a host-side participant id (an opaque token, see
+// CoopCombatParticipant's comment) to whichever local Object mirrors it.
+// wasSpawned tracks whether that local object was freshly created (obj_pid_new)
+// versus adopted from one that already existed in the client's own
+// independently-loaded map -- only spawned ones get cleaned up when combat
+// ends, since an adopted one is a real, persistent map object that should be
+// left alone.
+struct CoopParticipantEntry {
+    int32_t hostId;
+    Object* localObject;
+    bool wasSpawned;
+
+    // Same arrival-based smoothing technique as g_coopLastCommandedTile for
+    // the companion/obj_dude (see its comment): only issue a new run once
+    // the object has actually reached the last commanded tile, rather than
+    // reissuing on every ~100ms broadcast. -1 = nothing commanded yet.
+    int lastCommandedTile;
+};
+
+const int kCoopMaxParticipants = 32;
+static CoopParticipantEntry g_coopParticipants[kCoopMaxParticipants];
+static int g_coopParticipantCount = 0;
 
 // Host-side only: true only while coopnet_combat_input()'s own loop is
 // running, i.e. genuinely the companion's turn. Gates applying an incoming
@@ -734,23 +781,39 @@ static void coopnet_host_apply_combat_move(int targetTile)
 }
 
 // Host-side only: applies a COOP_MSG_COMBAT_ACTION attack during the
-// companion's own combat turn. No client-side enemy targeting UI exists yet
-// (needs participant mirroring, not yet built), so this reuses combat_ai()
-// -- the same function that drives a full AI-controlled turn elsewhere in
-// combat_turn() -- letting it pick a sensible target (ai_danger_source())
-// and handle moving into range + attacking with whatever AP the companion
-// has left. This means one press hands the rest of the turn's decisions to
-// the AI rather than queuing a single discrete attack; acceptable for this
-// phase (auto-target, per the original milestone-3 plan) -- real
-// player-chosen targeting is a later phase once the client can actually see
-// synced enemies.
-static void coopnet_host_apply_combat_attack()
+// companion's own combat turn. Reuses combat_ai() -- the same function that
+// drives a full AI-controlled turn elsewhere in combat_turn() -- rather than
+// combat_attack_this()'s player-specific flow (which is deeply tied to
+// obj_dude: it reads the interface's weapon/aim-mode selection and reports
+// out-of-ammo/out-of-range/etc. via on-screen player messages, none of which
+// make sense for the companion). combat_ai(critter, target) already handles
+// both cases cleanly: given a specific target it calls ai_try_attack()
+// directly; given NULL it picks one itself via ai_danger_source() first.
+// Either way it also handles moving into range and weapon selection
+// automatically, so one press can consume the rest of the turn's AP on
+// whatever it decides, not a single precise attack.
+static void coopnet_host_apply_combat_attack(int32_t targetId)
 {
     if (g_coopCompanion == NULL) {
         return;
     }
 
-    combat_ai(g_coopCompanion, NULL);
+    Object* target = NULL;
+    if (targetId != -1) {
+        int count = combat_get_list_count();
+        for (int i = 0; i < count; i++) {
+            Object* candidate = combat_get_list_item(i);
+            if (candidate != NULL && candidate->id == targetId) {
+                target = candidate;
+                break;
+            }
+        }
+        if (target == NULL) {
+            debug_printf("\nCoop: attack targetId=%d not found (already dead/gone?), falling back to auto-target\n", targetId);
+        }
+    }
+
+    combat_ai(g_coopCompanion, target);
 }
 
 static void coopnet_host_broadcast_positions()
@@ -771,6 +834,39 @@ static void coopnet_host_broadcast_positions()
         pos.elevation = obj_dude->elevation;
         pos.rotation = obj_dude->rotation;
         coopnet_send_message(g_coopPeerSocket, COOP_MSG_POSITION, &pos, sizeof(pos));
+    }
+}
+
+// Host-side only, called alongside coopnet_host_broadcast_positions() at the
+// same cadence while a synced combat is active: broadcasts every combat
+// participant's current state, skipping obj_dude and the companion (already
+// covered by position broadcasts above). No-op outside combat.
+// combat_get_list_count()/_item() are small read-only accessors onto
+// combat.cc's otherwise-file-static combat_list[].
+static void coopnet_host_broadcast_combat_participants()
+{
+    if (!isInCombat()) {
+        return;
+    }
+
+    int count = combat_get_list_count();
+    for (int i = 0; i < count; i++) {
+        Object* critter = combat_get_list_item(i);
+        if (critter == NULL || critter == obj_dude || critter == g_coopCompanion) {
+            continue;
+        }
+
+        CoopCombatParticipant participant;
+        participant.id = critter->id;
+        participant.pid = critter->pid;
+        participant.tile = critter->tile;
+        participant.elevation = critter->elevation;
+        participant.rotation = critter->rotation;
+        participant.hp = stat_level(critter, STAT_CURRENT_HIT_POINTS);
+        participant.isDead = critter_is_dead(critter) ? 1 : 0;
+        debug_printf("\nCoop-debug: broadcasting participant id=%d pid=%d tile=%d hp=%d isDead=%d (listIndex=%d/%d)\n",
+            participant.id, participant.pid, participant.tile, participant.hp, participant.isDead, i, count);
+        coopnet_send_message(g_coopPeerSocket, COOP_MSG_COMBAT_PARTICIPANT, &participant, sizeof(participant));
     }
 }
 
@@ -1087,8 +1183,8 @@ static void coopnet_poll_host()
                         debug_printf("\nCoop: received COMBAT_ACTION end-turn\n");
                         g_coopHostCombatEndTurnRequested = true;
                     } else if (action.actionType == COOP_COMBAT_ACTION_ATTACK) {
-                        debug_printf("\nCoop: received COMBAT_ACTION attack\n");
-                        coopnet_host_apply_combat_attack();
+                        debug_printf("\nCoop: received COMBAT_ACTION attack targetId=%d\n", action.targetId);
+                        coopnet_host_apply_combat_attack(action.targetId);
                     }
                 }
             }
@@ -1105,6 +1201,7 @@ static void coopnet_poll_host()
 
         if (!disconnected && now - g_coopLastBroadcastTimeMs >= kCoopBroadcastIntervalMs) {
             coopnet_host_broadcast_positions();
+            coopnet_host_broadcast_combat_participants();
             g_coopLastBroadcastTimeMs = now;
         }
 
@@ -1184,6 +1281,181 @@ static void coopnet_client_apply_position(const CoopPosition& pos)
     register_object_run_to_tile(target, pos.tile, pos.elevation, -1, 0);
     register_end();
     g_coopLastCommandedTile[pos.which] = pos.tile;
+}
+
+// Client-side only: finds the local mirror object for a host participant id,
+// or NULL if none is currently tracked (e.g. combat hasn't started, or that
+// participant was never broadcast/already cleaned up).
+static Object* coopnet_find_participant_object(int32_t hostId)
+{
+    for (int i = 0; i < g_coopParticipantCount; i++) {
+        if (g_coopParticipants[i].hostId == hostId) {
+            return g_coopParticipants[i].localObject;
+        }
+    }
+    return NULL;
+}
+
+// Client-side only, the reverse of the above: given a local object (e.g.
+// one the player just clicked on), finds the host participant id it mirrors,
+// or -1 if it isn't a tracked participant at all (some other, unsynced NPC).
+static int32_t coopnet_find_participant_id(Object* localObject)
+{
+    for (int i = 0; i < g_coopParticipantCount; i++) {
+        if (g_coopParticipants[i].localObject == localObject) {
+            return g_coopParticipants[i].hostId;
+        }
+    }
+    return -1;
+}
+
+// How far a candidate local critter may be from a newly-reported
+// participant's tile and still be adopted as its pre-existing mirror,
+// rather than spawning a fresh duplicate -- see coopnet_apply_combat_participant()'s
+// comment for why an exact tile match is too strict.
+const int kCoopParticipantAdoptDistance = 20;
+
+// Client-side only: applies one COOP_MSG_COMBAT_PARTICIPANT. First time seen
+// for that id, finds-or-spawns a local mirror object (same pattern as
+// coopnet_find_or_spawn_companion() -- prefer an object that already exists
+// in the client's own independently-loaded map over spawning a fresh one).
+// Matches by nearest unclaimed critter of the same pid within
+// kCoopParticipantAdoptDistance tiles, not an exact tile match -- confirmed
+// via testing that requiring an exact match regularly failed and produced
+// visible duplicates: participant broadcasts share the same ~100ms cadence
+// as combat processing, so by the time the first one for a given id reaches
+// the client, the real enemy has often already taken a step or two away from
+// its original map-spawn tile, meaning the exact-match search found nothing,
+// spawned a brand new mirror, and left the real, never-adopted local critter
+// wandering around too -- looking like "the client has more enemies than the
+// host." Subsequent calls for an already-tracked id just update position/
+// rotation/hp; a dead participant is removed from the map entirely (no
+// attempt to sync the death animation).
+static void coopnet_apply_combat_participant(const CoopCombatParticipant& p)
+{
+    Object* object = coopnet_find_participant_object(p.id);
+    bool wasSpawned = false;
+
+    if (object == NULL) {
+        if (g_coopParticipantCount >= kCoopMaxParticipants) {
+            debug_printf("\nCoop: participant table full, dropping id=%d\n", p.id);
+            return;
+        }
+
+        Object* bestCandidate = NULL;
+        int bestDist = kCoopParticipantAdoptDistance + 1;
+        for (Object* candidate = obj_find_first_at(p.elevation); candidate != NULL; candidate = obj_find_next_at()) {
+            if (candidate->pid != p.pid || FID_TYPE(candidate->fid) != OBJ_TYPE_CRITTER) {
+                continue;
+            }
+            if (candidate == obj_dude || candidate == g_coopCompanion) {
+                continue;
+            }
+            if (coopnet_find_participant_id(candidate) != -1) {
+                continue;
+            }
+            int dist = tile_dist(candidate->tile, p.tile);
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestCandidate = candidate;
+            }
+        }
+        object = bestCandidate;
+
+        if (object == NULL) {
+            if (obj_pid_new(&object, p.pid) == -1) {
+                debug_printf("\nCoop: obj_pid_new failed applying combat participant (pid=%d)\n", p.pid);
+                return;
+            }
+            Rect rect;
+            obj_connect(object, p.tile, p.elevation, &rect);
+            tile_refresh_rect(&rect, p.elevation);
+            wasSpawned = true;
+        }
+
+        int index = g_coopParticipantCount++;
+        g_coopParticipants[index].hostId = p.id;
+        g_coopParticipants[index].localObject = object;
+        g_coopParticipants[index].wasSpawned = wasSpawned;
+        g_coopParticipants[index].lastCommandedTile = -1;
+        debug_printf("\nCoop: tracking new combat participant id=%d pid=%d tile=%d spawned=%d\n", p.id, p.pid, p.tile, wasSpawned);
+    }
+
+    int index = -1;
+    for (int i = 0; i < g_coopParticipantCount; i++) {
+        if (g_coopParticipants[i].hostId == p.id) {
+            index = i;
+            break;
+        }
+    }
+    if (index == -1) {
+        return;
+    }
+
+    if (p.isDead) {
+        debug_printf("\nCoop-debug: removing participant id=%d pid=%d (host reported isDead) hp=%d\n", p.id, p.pid, p.hp);
+        obj_destroy(g_coopParticipants[index].localObject);
+        g_coopParticipants[index] = g_coopParticipants[g_coopParticipantCount - 1];
+        g_coopParticipantCount--;
+        return;
+    }
+
+    // Same three-way split as coopnet_client_apply_position(): already
+    // there (rotation only), a jump large enough that an animated run would
+    // look implausible (snap instantly), or a normal step (smooth animated
+    // run, throttled to real arrival so a new ~100ms update doesn't cut the
+    // stride short -- see g_coopParticipants[].lastCommandedTile's comment).
+    // Without this, participants were reported via instant obj_move_to_tile()
+    // snaps only, which looked like teleporting on the client even though
+    // the same movement looked like normal animated walking on the host
+    // (confirmed via testing).
+    if (object->tile == p.tile) {
+        if (object->rotation != p.rotation) {
+            Rect rect;
+            obj_set_rotation(object, p.rotation, &rect);
+            tile_refresh_rect(&rect, p.elevation);
+        }
+        return;
+    }
+
+    if (object->elevation != p.elevation || tile_dist(object->tile, p.tile) > kCoopSnapDistanceThreshold) {
+        Rect rect;
+        obj_move_to_tile(object, p.tile, p.elevation, &rect);
+        obj_set_rotation(object, p.rotation, &rect);
+        tile_refresh_rect(&rect, p.elevation);
+        g_coopParticipants[index].lastCommandedTile = p.tile;
+        return;
+    }
+
+    if (g_coopParticipants[index].lastCommandedTile == p.tile) {
+        return;
+    }
+
+    bool hasArrived = g_coopParticipants[index].lastCommandedTile == -1 || object->tile == g_coopParticipants[index].lastCommandedTile;
+    if (!hasArrived) {
+        return;
+    }
+
+    register_clear(object);
+    register_begin(ANIMATION_REQUEST_UNRESERVED);
+    register_object_run_to_tile(object, p.tile, p.elevation, -1, 0);
+    register_end();
+    g_coopParticipants[index].lastCommandedTile = p.tile;
+}
+
+// Client-side only: called on COOP_MSG_COMBAT_END. Destroys only the
+// participant mirrors that were freshly spawned for this fight (an adopted
+// one is a real, persistent map object and is left alone) and clears the
+// table -- host-side ids are only meaningful for the combat that assigned
+// them.
+static void coopnet_clear_combat_participants()
+{
+    for (int i = 0; i < g_coopParticipantCount; i++) {
+        if (g_coopParticipants[i].wasSpawned) {
+            obj_destroy(g_coopParticipants[i].localObject);
+        }
+    }
+    g_coopParticipantCount = 0;
 }
 
 static void coopnet_poll_client()
@@ -1308,13 +1580,26 @@ static void coopnet_poll_client()
                 debug_printf("\nCoop: received COMBAT_TURN ap=%d, myTurnActive=%d\n", turn.actionPoints, g_coopClientCombatTurnActive);
             } else if (type == COOP_MSG_COMBAT_BEGIN) {
                 debug_printf("\nCoop: received COMBAT_BEGIN\n");
+                // Defensive: guarantees a clean slate even if a previous
+                // fight's COMBAT_END was somehow missed (a dropped/delayed
+                // message, or a disconnect mid-fight) -- without this, any
+                // participant left over from that earlier fight would keep
+                // being treated as "already tracked" and never get its
+                // position corrected, since a brand new fight hands out
+                // fresh ids that won't match the stale entries.
+                coopnet_clear_combat_participants();
                 g_coopClientInCombat = true;
                 win_msg("Combat has started!", 100, 100, 0);
             } else if (type == COOP_MSG_COMBAT_END) {
                 debug_printf("\nCoop: received COMBAT_END\n");
                 g_coopClientInCombat = false;
                 g_coopClientCombatTurnActive = false;
+                coopnet_clear_combat_participants();
                 win_msg("Combat has ended.", 100, 100, 0);
+            } else if (type == COOP_MSG_COMBAT_PARTICIPANT && payloadLen == sizeof(CoopCombatParticipant)) {
+                CoopCombatParticipant participant;
+                memcpy(&participant, payload, sizeof(participant));
+                coopnet_apply_combat_participant(participant);
             }
         }
 
@@ -1455,6 +1740,7 @@ void coopnet_on_client_combat_move_click(int tile)
     CoopCombatAction action;
     action.actionType = COOP_COMBAT_ACTION_MOVE;
     action.targetTile = tile;
+    action.targetId = -1;
     bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_COMBAT_ACTION, &action, sizeof(action));
     debug_printf("\nCoop: sent COMBAT_ACTION move targetTile=%d success=%d\n", tile, sent);
 }
@@ -1468,21 +1754,25 @@ void coopnet_on_client_end_turn()
     CoopCombatAction action;
     action.actionType = COOP_COMBAT_ACTION_END_TURN;
     action.targetTile = -1;
+    action.targetId = -1;
     bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_COMBAT_ACTION, &action, sizeof(action));
     debug_printf("\nCoop: sent COMBAT_ACTION end-turn success=%d\n", sent);
 }
 
-void coopnet_on_client_attack()
+void coopnet_on_client_attack(Object* target)
 {
     if (g_coopConnState != CoopConnState::Connected) {
         return;
     }
 
+    int32_t targetId = (target != NULL) ? coopnet_find_participant_id(target) : -1;
+
     CoopCombatAction action;
     action.actionType = COOP_COMBAT_ACTION_ATTACK;
     action.targetTile = -1;
+    action.targetId = targetId;
     bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_COMBAT_ACTION, &action, sizeof(action));
-    debug_printf("\nCoop: sent COMBAT_ACTION attack success=%d\n", sent);
+    debug_printf("\nCoop: sent COMBAT_ACTION attack targetId=%d success=%d\n", targetId, sent);
 }
 
 void coopnet_on_client_pickup_click(int pid, int tile, int elevation)

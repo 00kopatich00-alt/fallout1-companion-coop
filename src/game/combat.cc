@@ -1727,6 +1727,35 @@ Object* combat_whose_turn()
     }
 }
 
+int combat_get_list_count()
+{
+    // Deliberately list_com, not list_total: list_total also includes
+    // list_noncom, every same-type critter on the whole elevation that
+    // *might* still join the fight but hasn't actually engaged yet (see
+    // combat_begin()'s initial list_noncom = list_total; list_com = 0, and
+    // the noncom-scanning loop in combat_should_end() that promotes them in
+    // as they choose to join). Broadcasting list_total to the coop client
+    // was confirmed via testing to sync in dozens of unrelated, distant
+    // critters that were never actually part of the fight, and to look like
+    // constant respawn/despawn churn as noncoms shuffled position in the
+    // array. list_com is exactly "the committed combatants," which is what
+    // coopnet_host_broadcast_combat_participants() actually wants.
+    if (!isInCombat()) {
+        return 0;
+    }
+
+    return list_com;
+}
+
+Object* combat_get_list_item(int index)
+{
+    if (!isInCombat() || index < 0 || index >= list_com) {
+        return NULL;
+    }
+
+    return combat_list[index];
+}
+
 // 0x41FD5C
 void combat_data_init(Object* obj)
 {
