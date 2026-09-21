@@ -72,6 +72,7 @@ enum CoopMsgType : uint8_t {
     COOP_MSG_COMBAT_BEGIN = 13, // host -> client, a synced combat has started
     COOP_MSG_COMBAT_END = 14, // host -> client, the synced combat has ended
     COOP_MSG_COMBAT_PARTICIPANT = 15, // host -> client, one combat participant's identity + current state
+    COOP_MSG_MAP_TRANSITION = 16, // host -> client, the host's local map just changed
 };
 
 const uint32_t kCoopProtocolVersion = 1;
@@ -177,6 +178,18 @@ struct CoopInventorySync {
     CoopInventoryItemEntry items[kCoopMaxInventorySyncItems];
 };
 
+// Host -> client: the host's own local map just changed (a normal exit/
+// elevator was used, or worldmap travel finished loading a new area). The
+// client runs its own fully independent copy of the game with its own map
+// loaded, so nothing else would ever bring it along -- see
+// coopnet_host_check_map_transition()'s comment for the full picture.
+struct CoopMapTransition {
+    char mapName[16];
+    int32_t tile;
+    int32_t elevation;
+    int32_t rotation;
+};
+
 #pragma pack(pop)
 
 // ---------------------------------------------------------------------------
@@ -276,6 +289,12 @@ static uint32_t g_coopLastRecvTimeMs = 0;
 static uint32_t g_coopLastBroadcastTimeMs = 0;
 static uint32_t g_coopLastFollowCheckTimeMs = 0;
 static uint32_t g_coopLastHeartbeatSentTimeMs = 0;
+
+// Host-side only: map_data.name as of the last coopnet_poll_host() tick.
+// Compared each tick to detect a completed map transition (see
+// coopnet_host_check_map_transition()). Set directly in coopnet_start_host()
+// so starting to host mid-map is never mistaken for a transition.
+static char g_coopHostLastMapName[16] = "";
 
 // coopnet_send_message()'s retry budget when send() reports the socket
 // buffer is full (EWOULDBLOCK) -- confirmed via testing this is a real risk
@@ -543,6 +562,27 @@ static Object* coopnet_find_or_spawn_companion(int pid, int tile, int elevation)
     return companion;
 }
 
+// Shared by host and client: properly frees a companion object that is about
+// to be replaced (e.g. after a map transition). obj_erase_object()/obj_remove()
+// both silently refuse to touch anything with OBJECT_NO_REMOVE set (that's
+// the whole point of the flag -- see coopnet_find_or_spawn_companion()), so
+// it must be cleared first. Without this, map_load_file()'s obj_remove_all()
+// leaves the old companion fully intact and still linked into whatever tile
+// slot it last occupied, which then bleeds through onto the newly loaded
+// map as a ghost object (same class of bug as the earlier item-ghosting
+// issue) instead of ever actually being removed.
+static void coopnet_destroy_companion(Object* companion)
+{
+    if (companion == NULL) {
+        return;
+    }
+
+    companion->flags &= ~OBJECT_NO_REMOVE;
+    int rc = obj_erase_object(companion, NULL);
+    debug_printf("\nCoop-debug: coopnet_destroy_companion pid=%d tile=%d elevation=%d obj_erase_object rc=%d\n",
+        companion->pid, companion->tile, companion->elevation, rc);
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -625,6 +665,9 @@ bool coopnet_start_host(int port)
     if (g_coopCompanion == NULL) {
         return false;
     }
+
+    strncpy(g_coopHostLastMapName, map_data.name, sizeof(g_coopHostLastMapName) - 1);
+    g_coopHostLastMapName[sizeof(g_coopHostLastMapName) - 1] = '\0';
 
     CoopSocket listenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (listenSocket == COOP_INVALID_SOCKET) {
@@ -898,6 +941,59 @@ static void coopnet_host_broadcast_companion_inventory()
     debug_printf("\nCoop: broadcast companion inventory (%d items) success=%d\n", count, sent);
 }
 
+// Host-side only, called every tick regardless of connection state (the
+// companion still needs to follow through transitions during solo play,
+// same reasoning as coopnet_host_run_disconnected_follow()). Detects the
+// host's own map having changed -- a normal exit/elevator was used, or
+// worldmap travel finished loading a new area -- by comparing map_data.name
+// against what it was last tick. Nothing else keeps the client in step
+// across a map change, since the client runs its own fully independent copy
+// of the game with its own map loaded: it never sees object.cc's exit-tile
+// check fire for the host's own dude. Also respawns the companion here,
+// since it is not a real party member (see coopnet_find_or_spawn_companion()'s
+// comment) and does not survive map_load_file()'s obj_remove_all() cleanly
+// (see coopnet_destroy_companion()'s comment).
+static void coopnet_host_check_map_transition()
+{
+    if (strncmp(g_coopHostLastMapName, map_data.name, sizeof(g_coopHostLastMapName)) == 0) {
+        return;
+    }
+
+    strncpy(g_coopHostLastMapName, map_data.name, sizeof(g_coopHostLastMapName) - 1);
+    g_coopHostLastMapName[sizeof(g_coopHostLastMapName) - 1] = '\0';
+
+    debug_printf("\nCoop: host map changed to %.16s, respawning companion (old companion=%p pid=%d tile=%d)\n",
+        map_data.name, (void*)g_coopCompanion, g_coopCompanion != NULL ? g_coopCompanion->pid : -1, g_coopCompanion != NULL ? g_coopCompanion->tile : -1);
+
+    coopnet_destroy_companion(g_coopCompanion);
+    g_coopCompanion = coopnet_find_or_spawn_companion(obj_dude->pid, obj_dude->tile, obj_dude->elevation);
+
+    debug_printf("\nCoop-debug: new companion=%p pid=%d tile=%d\n",
+        (void*)g_coopCompanion, g_coopCompanion != NULL ? g_coopCompanion->pid : -1, g_coopCompanion != NULL ? g_coopCompanion->tile : -1);
+
+    g_coopLastCommandedTile[0] = -1;
+    g_coopLastCommandedTile[1] = -1;
+
+    if (g_coopConnState != CoopConnState::Connected) {
+        return;
+    }
+
+    CoopMapTransition transition;
+    memset(&transition, 0, sizeof(transition));
+    strncpy(transition.mapName, map_data.name, sizeof(transition.mapName) - 1);
+    transition.tile = obj_dude->tile;
+    transition.elevation = obj_dude->elevation;
+    transition.rotation = obj_dude->rotation;
+
+    bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_MAP_TRANSITION, &transition, sizeof(transition));
+    debug_printf("\nCoop: sent MAP_TRANSITION to %.16s (tile=%d elevation=%d) success=%d\n",
+        transition.mapName, transition.tile, transition.elevation, sent);
+
+    if (kCoopCompanionInventorySyncEnabled) {
+        coopnet_host_broadcast_companion_inventory();
+    }
+}
+
 // Crude placeholder follow-AI used only while no client is connected, so the
 // host can keep playing solo instead of the companion standing frozen. Real
 // follow behavior (formation offsets, obstacle avoidance) is future work.
@@ -1084,6 +1180,8 @@ static void coopnet_host_process_action_queue()
 
 static void coopnet_poll_host()
 {
+    coopnet_host_check_map_transition();
+
     if (g_coopConnState == CoopConnState::Listening) {
         sockaddr_in clientAddr;
 #ifdef _WIN32
@@ -1458,6 +1556,47 @@ static void coopnet_clear_combat_participants()
     g_coopParticipantCount = 0;
 }
 
+// Client-side only: applies a COOP_MSG_MAP_TRANSITION. The host is the sole
+// authority on when a transition happens (see object.cc's obj_move_to_tile()
+// client-role guard and coopnet_host_check_map_transition()'s comment) -- this
+// force-loads the same map file locally and places the mirrored obj_dude and
+// a fresh local companion placeholder at the given spot. Exact companion
+// position doesn't matter much here since the next COOP_MSG_POSITION
+// broadcast (moments away) corrects it.
+static void coopnet_client_apply_map_transition(const CoopMapTransition& transition)
+{
+    char mapName[16];
+    strncpy(mapName, transition.mapName, sizeof(mapName) - 1);
+    mapName[sizeof(mapName) - 1] = '\0';
+
+    debug_printf("\nCoop: client applying MAP_TRANSITION to %s (tile=%d elevation=%d)\n", mapName, transition.tile, transition.elevation);
+
+    g_coopClientInCombat = false;
+    g_coopClientCombatTurnActive = false;
+    coopnet_clear_combat_participants();
+
+    if (map_load(mapName) == -1) {
+        debug_printf("\nCoop: client failed to load map %s for MAP_TRANSITION\n", mapName);
+        return;
+    }
+
+    if (hexGridTileIsValid(transition.tile) && elevationIsValid(transition.elevation)) {
+        obj_move_to_tile(obj_dude, transition.tile, transition.elevation, NULL);
+        map_set_elevation(transition.elevation);
+        obj_set_rotation(obj_dude, transition.rotation, NULL);
+    }
+
+    if (tile_set_center(obj_dude->tile, TILE_SET_CENTER_REFRESH_WINDOW) == -1) {
+        debug_printf("\nCoop: client attempt to center out-of-bounds after MAP_TRANSITION\n");
+    }
+
+    coopnet_destroy_companion(g_coopCompanion);
+    g_coopCompanion = coopnet_find_or_spawn_companion(obj_dude->pid, obj_dude->tile, obj_dude->elevation);
+
+    g_coopLastCommandedTile[0] = -1;
+    g_coopLastCommandedTile[1] = -1;
+}
+
 static void coopnet_poll_client()
 {
     if (g_coopConnState == CoopConnState::Connecting) {
@@ -1600,6 +1739,10 @@ static void coopnet_poll_client()
                 CoopCombatParticipant participant;
                 memcpy(&participant, payload, sizeof(participant));
                 coopnet_apply_combat_participant(participant);
+            } else if (type == COOP_MSG_MAP_TRANSITION && payloadLen == sizeof(CoopMapTransition)) {
+                CoopMapTransition transition;
+                memcpy(&transition, payload, sizeof(transition));
+                coopnet_client_apply_map_transition(transition);
             }
         }
 

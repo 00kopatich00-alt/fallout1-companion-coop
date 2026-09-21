@@ -8,6 +8,7 @@
 #include "game/anim.h"
 #include "game/art.h"
 #include "game/combat.h"
+#include "game/coopnet.h"
 #include "game/critter.h"
 #include "game/game.h"
 #include "game/gconfig.h"
@@ -1397,7 +1398,19 @@ int obj_move_to_tile(Object* obj, int tile, int elevation, Rect* rect)
         rect_min_bound(rect, &v23, rect);
     }
 
-    if (obj == obj_dude) {
+    // Coop: on the client, obj_dude is a mirror of the HOST's character
+    // (moved by coopnet_client_apply_position(), not local input) -- letting
+    // it independently trigger a map exit here would race the explicit
+    // COOP_MSG_MAP_TRANSITION the host sends for its own, authoritative exit.
+    // The host is the only one allowed to decide when a transition happens --
+    // which is also why the companion is checked here too: it's a real,
+    // host-authoritative object (the client only ever moves it indirectly,
+    // via move-intent messages the host applies), so the client walking the
+    // companion onto an exit should trigger a transition exactly like the
+    // host's own dude doing so, and coopnet_host_check_map_transition()
+    // (coopnet.cc) picks up the resulting map_data.name change and relays it
+    // the same way either way.
+    if ((obj == obj_dude || obj == coopnet_get_companion()) && coopnet_get_role() != CoopRole::Client) {
         ObjectListNode* objectListNode = objectTable[tile];
         while (objectListNode != NULL) {
             Object* obj = objectListNode->obj;
