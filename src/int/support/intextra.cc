@@ -836,34 +836,51 @@ static void op_dude_obj(Program* program)
 {
     // DUDE_OBJ is how every compiled script asks "who is the player" --
     // dialogue, quest checks, item logic, and (critically) a hostile
-    // creature's own periodic combat-perception check via its
-    // SCRIPT_PROC_COMBAT procedure, which typically measures its distance
-    // to whatever this returns to decide whether to attack. Always
-    // returning obj_dude meant creatures could never perceive the coop
-    // companion as a target no matter how close it got -- confirmed via
-    // testing (a rat left alone with only the companion nearby never
-    // reacted at all, no combat() call, nothing).
+    // creature's own periodic threat-perception checks, which typically
+    // measure distance to whatever this returns to decide whether to
+    // attack. Always returning obj_dude meant creatures could never
+    // perceive the coop companion as a target no matter how close it got.
     //
-    // Deliberately scoped to only the SCRIPT_PROC_COMBAT case (via the
-    // calling script's own ->action field, set by exec_script_proc() right
-    // before running that specific procedure) rather than changing DUDE_OBJ
-    // globally -- DUDE_OBJ is used far too pervasively (dialogue, quests,
-    // reputation, item checks) to safely redirect everywhere without a much
-    // larger, harder-to-verify audit of every call site. Sneak-related
-    // player checks are untouched, since those don't run via
-    // SCRIPT_PROC_COMBAT.
+    // Two distinct perception procs both needed this, confirmed via
+    // testing/tracing rather than guessed up front:
+    // - SCRIPT_PROC_COMBAT: runs *within* an already-active fight (e.g.
+    //   deciding whether to keep attacking). Patched first; alone this did
+    //   NOT fix a fight starting from a standing start (confirmed: a rat
+    //   left alone with only the companion nearby never reacted, and this
+    //   branch's own confirmation debug_printf never fired in that case).
+    // - SCRIPT_PROC_CRITTER: script_chk_critters() (scripts.cc) round-
+    //   robins this across every critter script, one per tick, *only while
+    //   not already in combat* (scripts.cc:610 picks SCRIPT_PROC_COMBAT
+    //   instead once isInCombat() is true) -- i.e. this is the actual
+    //   ambient "should I start a fight" check. Confirmed via temporary
+    //   unconditional DUDE_OBJ call logging: every single call from a
+    //   hostile creature during a companion-only exposure test had
+    //   action=SCRIPT_PROC_CRITTER, never SCRIPT_PROC_COMBAT -- this was
+    //   the actual missing case, not a rejection inside combatai.cc (which
+    //   was ruled out separately: combatai_want_to_join()/ai_danger_source()
+    //   don't reference obj_dude/DUDE_OBJ at all, they're purely reactive
+    //   on whoHitMe, only relevant once a fight already exists).
+    //
+    // Deliberately scoped to just these two proc types (via the calling
+    // script's own ->action field, set by exec_script_proc() right before
+    // running a given procedure) rather than changing DUDE_OBJ globally --
+    // it's used far too pervasively (dialogue, quests, reputation, item
+    // checks) to safely redirect everywhere without a much larger, harder-
+    // to-verify audit of every call site. Sneak-related player checks are
+    // untouched, since those don't run via either of these two procs.
     Object* result = obj_dude;
 
     Object* companion = coopnet_get_companion();
     if (companion != NULL) {
         int sid = scr_find_sid_from_program(program);
         Script* script;
-        if (scr_ptr(sid, &script) != -1 && script->action == SCRIPT_PROC_COMBAT) {
+        if (scr_ptr(sid, &script) != -1
+            && (script->action == SCRIPT_PROC_COMBAT || script->action == SCRIPT_PROC_CRITTER)) {
             Object* self = script->owner;
             if (self != NULL && obj_dist(self, companion) < obj_dist(self, obj_dude)) {
                 result = companion;
-                debug_printf("\nCoop-debug: DUDE_OBJ substituted companion for critter pid=%d during SCRIPT_PROC_COMBAT (distToCompanion=%d, distToDude=%d)\n",
-                    self->pid, obj_dist(self, companion), obj_dist(self, obj_dude));
+                debug_printf("\nCoop-debug: DUDE_OBJ substituted companion for critter pid=%d during action=%d (distToCompanion=%d, distToDude=%d)\n",
+                    self->pid, script->action, obj_dist(self, companion), obj_dist(self, obj_dude));
             }
         }
     }
