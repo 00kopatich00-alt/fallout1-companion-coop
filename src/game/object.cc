@@ -1402,15 +1402,24 @@ int obj_move_to_tile(Object* obj, int tile, int elevation, Rect* rect)
     // (moved by coopnet_client_apply_position(), not local input) -- letting
     // it independently trigger a map exit here would race the explicit
     // COOP_MSG_MAP_TRANSITION the host sends for its own, authoritative exit.
-    // The host is the only one allowed to decide when a transition happens --
-    // which is also why the companion is checked here too: it's a real,
-    // host-authoritative object (the client only ever moves it indirectly,
-    // via move-intent messages the host applies), so the client walking the
-    // companion onto an exit should trigger a transition exactly like the
-    // host's own dude doing so, and coopnet_host_check_map_transition()
-    // (coopnet.cc) picks up the resulting map_data.name change and relays it
-    // the same way either way.
-    if ((obj == obj_dude || obj == coopnet_get_companion()) && coopnet_get_role() != CoopRole::Client) {
+    // The host is the only one allowed to decide when a transition happens.
+    //
+    // Only obj_dude is checked here, not the companion -- the companion
+    // *was* included too (client-triggered transitions), but reverted after
+    // testing: a real player's mouse click can only ever resolve to a tile
+    // they can actually see on screen, so they'd never click "through" a
+    // closed/locked door. The companion's movement comes from a network-
+    // sent tile number instead with no such visual constraint, so it could
+    // walk straight onto an exit marker that's specifically not meant to be
+    // reachable yet (a locked vault door, confirmed via testing), triggering
+    // a transition into a game state the destination map wasn't set up for
+    // -- this reliably corrupted something and crashed on the next render
+    // (STATUS_ACCESS_VIOLATION inside tile.cc's refresh_game(), confirmed
+    // via Windows Event Viewer + a fully bisected debug-checkpoint trace).
+    // Known limitation: the companion can no longer trigger a transition by
+    // itself; only the host's own character walking through an exit brings
+    // both players along.
+    if (obj == obj_dude && coopnet_get_role() != CoopRole::Client) {
         ObjectListNode* objectListNode = objectTable[tile];
         while (objectListNode != NULL) {
             Object* obj = objectListNode->obj;

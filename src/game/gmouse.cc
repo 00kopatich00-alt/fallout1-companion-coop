@@ -1071,7 +1071,18 @@ void gmouse_handle_event(int mouseX, int mouseY, int mouseState)
             || gmouse_3d_current_mode == GAME_MOUSE_MODE_USE_SCIENCE
             || gmouse_3d_current_mode == GAME_MOUSE_MODE_USE_REPAIR) {
             Object* target = object_under_mouse(-1, 1, map_elevation);
-            if (target == NULL || action_use_skill_on(obj_dude, target, gmouse_skill_table[gmouse_3d_current_mode - FIRST_GAME_MOUSE_MODE_SKILL]) != -1) {
+            int skill = gmouse_skill_table[gmouse_3d_current_mode - FIRST_GAME_MOUSE_MODE_SKILL];
+            if (target != NULL && coopnet_get_role() == CoopRole::Client) {
+                // Coop: the client's own obj_dude is a network-mirrored
+                // visual only (see the pickup/use-click cases above for the
+                // same reasoning) -- send a skill request for the companion
+                // to the host instead.
+                coopnet_on_client_skill_use(skill, target);
+                gmouse_set_cursor(MOUSE_CURSOR_NONE);
+                gmouse_3d_set_mode(GAME_MOUSE_MODE_MOVE);
+                return;
+            }
+            if (target == NULL || action_use_skill_on(obj_dude, target, skill) != -1) {
                 gmouse_set_cursor(MOUSE_CURSOR_NONE);
                 gmouse_3d_set_mode(GAME_MOUSE_MODE_MOVE);
             }
@@ -1255,7 +1266,11 @@ void gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                             }
 
                             if (skill != -1) {
-                                action_use_skill_on(obj_dude, target, skill);
+                                if (coopnet_get_role() == CoopRole::Client) {
+                                    coopnet_on_client_skill_use(skill, target);
+                                } else {
+                                    action_use_skill_on(obj_dude, target, skill);
+                                }
                             }
                         }
                         break;

@@ -809,8 +809,21 @@ static int partyFixMultipleMembers()
 
     // TODO: This loop is wrong. Looks like it can restart itself from the
     // beginning. Probably was implemented with two nested loops.
+    //
+    // Coop: real use-after-free confirmed via testing (Windows Event
+    // Viewer: STATUS_ACCESS_VIOLATION) on a heavily-populated map whose
+    // save data needed a genuine doppelganger cleanup below -- obj_find_next()
+    // reads the static find_ptr cursor left by the *previous* find call,
+    // but obj_erase_object() below can free that exact node (when `object`
+    // itself turns out to be the doppelganger), leaving find_ptr dangling
+    // for the old "object = obj_find_next();" call that used to sit at the
+    // bottom of this loop. Advancing the cursor to `next` up front, before
+    // any of this iteration's destructive work runs, keeps find_ptr always
+    // pointing at a node that's guaranteed to still be alive.
     object = obj_find_first();
     while (object != NULL) {
+        Object* next = obj_find_next();
+
         v1 = false;
 
         if (PID_TYPE(object->pid) == OBJ_TYPE_CRITTER) {
@@ -864,7 +877,7 @@ static int partyFixMultipleMembers()
             }
         }
 
-        object = obj_find_next();
+        object = next;
     }
 
     for (index = 0; index < partyMemberCount; index++) {

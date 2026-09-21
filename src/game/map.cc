@@ -1220,6 +1220,11 @@ static int map_age_dead_critters()
     return rc;
 }
 
+void map_reset_transition_state()
+{
+    memset(&map_state, 0, sizeof(map_state));
+}
+
 // 0x475160
 int map_leave_map(MapTransition* transition)
 {

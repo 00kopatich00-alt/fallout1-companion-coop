@@ -116,6 +116,18 @@ int map_load_file(DB_FILE* stream);
 int map_load_in_game(char* fileName);
 int map_leave_map(MapTransition* transition);
 int map_check_state();
+
+// Called from coopnet.cc right before a direct-by-name map_load() (the
+// client's own map-transition sync, which bypasses map_leave_map()/
+// map_check_state() entirely since it isn't a real in-engine exit trigger)
+// -- map_load_file()'s own tail code reads the file-static map_state
+// (rotation, "is this a real transition") to decide whether to apply a
+// specific arrival rotation. Left stale/uninitialized on the client (never
+// populated by map_leave_map() on that path), it can read garbage and call
+// obj_set_rotation() with an invalid rotation -- confirmed via testing as
+// a real crash (STATUS_ACCESS_VIOLATION). Resetting it first makes
+// map_load_file() take its safe "not a real transition" branch instead.
+void map_reset_transition_state();
 void map_fix_critter_combat_data();
 int map_save();
 int map_save_file(DB_FILE* stream);

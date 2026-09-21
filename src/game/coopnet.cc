@@ -89,6 +89,7 @@ enum CoopMsgType : uint8_t {
     COOP_MSG_DIALOGUE_STATE = 18, // host -> client, the currently-displayed NPC line + option texts
     COOP_MSG_DIALOGUE_END = 19, // host -> client, the conversation ended
     COOP_MSG_GAME_OVER = 20, // host -> client, the shared game has ended
+    COOP_MSG_SKILL_REQUEST = 21, // client -> host, "have the companion use this skill on this target"
 };
 
 const uint32_t kCoopProtocolVersion = 1;
@@ -167,6 +168,33 @@ struct CoopItemEvent {
     int32_t pid;
     int32_t tile;
     int32_t elevation;
+};
+
+// Client -> host: "have the companion use this skill (Lockpick, Steal,
+// Traps, First Aid, Doctor, Science, Repair) on this target." Same
+// (pid, tile, elevation) target-identity caveat as CoopItemEvent -- the
+// target can be an item, scenery, or critter depending on the skill, so
+// unlike pickup/use requests there's no single expected FID_TYPE to filter
+// by when resolving it host-side.
+//
+// targetIsHostDude is a special case for exactly one real ambiguity: the
+// companion deliberately shares obj_dude's own pid (that's what lets it
+// reuse the host's real stats/skills for free -- see
+// coopnet_on_client_skill_use()'s comment in coopnet.h), so a plain
+// (pid, tile, elevation) lookup for "the host's character" could just as
+// easily resolve to the companion itself if they're standing near each
+// other -- confirmed via testing as the cause of, e.g., Steal silently
+// failing (action_use_skill_on() correctly refuses a2 == a1, "can't steal
+// from yourself", when the mis-resolved target turned out to be the
+// companion). Set when the client's own local target *is* obj_dude (the
+// mirrored host character on the client's screen); the host then resolves
+// straight to its own obj_dude, skipping the ambiguous search entirely.
+struct CoopSkillRequest {
+    int32_t skill;
+    int32_t pid;
+    int32_t tile;
+    int32_t elevation;
+    uint8_t targetIsHostDude;
 };
 
 // The companion's inventory lives as a real, independent Object on each
@@ -388,11 +416,14 @@ const bool kCoopCompanionInventorySyncEnabled = true;
 enum CoopCompanionActionKind {
     COOP_COMPANION_ACTION_PICKUP,
     COOP_COMPANION_ACTION_USE,
+    COOP_COMPANION_ACTION_SKILL,
 };
 
 struct CoopCompanionActionRequest {
     CoopCompanionActionKind kind;
     CoopItemEvent target;
+    int32_t skill; // only meaningful for COOP_COMPANION_ACTION_SKILL
+    bool targetIsHostDude; // only meaningful for COOP_COMPANION_ACTION_SKILL -- see CoopSkillRequest's comment
 };
 
 const int kCoopActionQueueCapacity = 16;
@@ -1346,10 +1377,10 @@ static void coopnet_apply_companion_inventory(const CoopInventorySync& sync)
     debug_printf("\nCoop: applied companion inventory sync (%d items)\n", sync.itemCount);
 }
 
-// Host-side only: enqueues a client's action request (pickup or use) rather
-// than applying it immediately -- see the g_coopActionQueue comment above for
-// why.
-static void coopnet_enqueue_companion_action(CoopCompanionActionKind kind, const CoopItemEvent& evt)
+// Host-side only: enqueues a client's action request (pickup, use, or skill)
+// rather than applying it immediately -- see the g_coopActionQueue comment
+// above for why. `skill` is only meaningful for COOP_COMPANION_ACTION_SKILL.
+static void coopnet_enqueue_companion_action(CoopCompanionActionKind kind, const CoopItemEvent& evt, int32_t skill = -1, bool targetIsHostDude = false)
 {
     if (g_coopActionQueueLen >= kCoopActionQueueCapacity) {
         debug_printf("\nCoop: companion action queue full, dropping request (kind=%d, pid=%d, tile=%d)\n", kind, evt.pid, evt.tile);
@@ -1359,6 +1390,8 @@ static void coopnet_enqueue_companion_action(CoopCompanionActionKind kind, const
     int tail = (g_coopActionQueueHead + g_coopActionQueueLen) % kCoopActionQueueCapacity;
     g_coopActionQueue[tail].kind = kind;
     g_coopActionQueue[tail].target = evt;
+    g_coopActionQueue[tail].skill = skill;
+    g_coopActionQueue[tail].targetIsHostDude = targetIsHostDude;
     g_coopActionQueueLen++;
 }
 
@@ -1412,18 +1445,50 @@ static void coopnet_host_process_action_queue()
     g_coopActionQueueLen--;
 
     const CoopItemEvent& evt = request.target;
-    int wantType = (request.kind == COOP_COMPANION_ACTION_PICKUP) ? OBJ_TYPE_ITEM : OBJ_TYPE_SCENERY;
+
+    // See CoopSkillRequest's comment: the companion shares obj_dude's own
+    // pid, so a plain (pid, tile, elevation) search for "the host's
+    // character" is ambiguous -- resolve straight to obj_dude instead of
+    // searching at all.
+    if (request.kind == COOP_COMPANION_ACTION_SKILL && request.targetIsHostDude) {
+        debug_printf("\nCoop: dispatching companion action kind=%d (skill=%d) directly at obj_dude, companion tile=%d elevation=%d, dist=%d\n",
+            request.kind, request.skill, g_coopCompanion->tile, g_coopCompanion->elevation, obj_dist(g_coopCompanion, obj_dude));
+        g_coopCompanionActionBusy = true;
+        g_coopCompanionActionStartMs = coopnet_now_ms();
+        if (action_use_skill_on(g_coopCompanion, obj_dude, request.skill) == -1) {
+            debug_printf("\nCoop: action_use_skill_on failed (skill=%d, target=obj_dude)\n", request.skill);
+            g_coopCompanionActionBusy = false;
+        }
+        return;
+    }
+
+    // Skill targets can be an item, scenery, or critter depending on the
+    // skill (Steal/First Aid/Doctor/Science/Repair all target critters,
+    // Lockpick/Traps target items/scenery) -- unlike pickup/use, there's no
+    // single expected FID_TYPE to filter by, so match on (pid, tile,
+    // elevation) alone.
+    int wantType = -1;
+    if (request.kind == COOP_COMPANION_ACTION_PICKUP) {
+        wantType = OBJ_TYPE_ITEM;
+    } else if (request.kind == COOP_COMPANION_ACTION_USE) {
+        wantType = OBJ_TYPE_SCENERY;
+    }
 
     for (Object* object = obj_find_first_at(evt.elevation); object != NULL; object = obj_find_next_at()) {
-        if (object->tile == evt.tile && object->pid == evt.pid && FID_TYPE(object->fid) == wantType) {
+        if (object->tile == evt.tile && object->pid == evt.pid && (wantType == -1 || FID_TYPE(object->fid) == wantType)) {
             debug_printf("\nCoop: dispatching companion action kind=%d, companion tile=%d elevation=%d, target tile=%d elevation=%d, dist=%d\n",
                 request.kind, g_coopCompanion->tile, g_coopCompanion->elevation, object->tile, object->elevation, obj_dist(g_coopCompanion, object));
             g_coopCompanionActionBusy = true;
             g_coopCompanionActionStartMs = coopnet_now_ms();
             if (request.kind == COOP_COMPANION_ACTION_PICKUP) {
                 action_get_an_object(g_coopCompanion, object);
-            } else {
+            } else if (request.kind == COOP_COMPANION_ACTION_USE) {
                 action_use_an_object(g_coopCompanion, object);
+            } else {
+                if (action_use_skill_on(g_coopCompanion, object, request.skill) == -1) {
+                    debug_printf("\nCoop: action_use_skill_on failed (skill=%d)\n", request.skill);
+                    g_coopCompanionActionBusy = false;
+                }
             }
             return;
         }
@@ -1522,6 +1587,15 @@ static void coopnet_poll_host()
                 memcpy(&evt, payload, sizeof(evt));
                 debug_printf("\nCoop: received USE_REQUEST from client (pid=%d, tile=%d)\n", evt.pid, evt.tile);
                 coopnet_enqueue_companion_action(COOP_COMPANION_ACTION_USE, evt);
+            } else if (type == COOP_MSG_SKILL_REQUEST && payloadLen == sizeof(CoopSkillRequest)) {
+                CoopSkillRequest req;
+                memcpy(&req, payload, sizeof(req));
+                debug_printf("\nCoop: received SKILL_REQUEST from client (skill=%d, pid=%d, tile=%d, targetIsHostDude=%d)\n", req.skill, req.pid, req.tile, req.targetIsHostDude);
+                CoopItemEvent evt;
+                evt.pid = req.pid;
+                evt.tile = req.tile;
+                evt.elevation = req.elevation;
+                coopnet_enqueue_companion_action(COOP_COMPANION_ACTION_SKILL, evt, req.skill, req.targetIsHostDude != 0);
             } else if (type == COOP_MSG_COMBAT_ACTION && payloadLen == sizeof(CoopCombatAction)) {
                 if (!g_coopHostCombatTurnActive) {
                     // Stray/late message outside the companion's actual
@@ -1835,6 +1909,13 @@ static void coopnet_client_apply_map_transition(const CoopMapTransition& transit
     g_coopClientInCombat = false;
     g_coopClientCombatTurnActive = false;
     coopnet_clear_combat_participants();
+
+    // This bypasses map_leave_map()/map_check_state() entirely (it's not a
+    // real in-engine exit trigger, just a direct by-name load), so
+    // map_data.cc's own file-static map_state is never populated for this
+    // call -- reset it first so map_load_file()'s tail code doesn't read
+    // stale/garbage data. See map_reset_transition_state()'s comment.
+    map_reset_transition_state();
 
     if (map_load(mapName) == -1) {
         debug_printf("\nCoop: client failed to load map %s for MAP_TRANSITION\n", mapName);
@@ -2363,6 +2444,27 @@ void coopnet_on_client_use_click(int pid, int tile, int elevation)
     evt.elevation = elevation;
     bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_USE_REQUEST, &evt, sizeof(evt));
     debug_printf("\nCoop: sent USE_REQUEST pid=%d tile=%d success=%d\n", pid, tile, sent);
+}
+
+void coopnet_on_client_skill_use(int skill, Object* target)
+{
+    if (target == NULL) {
+        return;
+    }
+
+    if (g_coopConnState != CoopConnState::Connected) {
+        debug_printf("\nCoop: skill click on pid=%d tile=%d ignored, not connected (state=%d)\n", target->pid, target->tile, static_cast<int>(g_coopConnState));
+        return;
+    }
+
+    CoopSkillRequest req;
+    req.skill = skill;
+    req.pid = target->pid;
+    req.tile = target->tile;
+    req.elevation = target->elevation;
+    req.targetIsHostDude = (target == obj_dude) ? 1 : 0;
+    bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_SKILL_REQUEST, &req, sizeof(req));
+    debug_printf("\nCoop: sent SKILL_REQUEST skill=%d pid=%d tile=%d targetIsHostDude=%d success=%d\n", skill, target->pid, target->tile, req.targetIsHostDude, sent);
 }
 
 void coopnet_notify_item_dropped(Object* critter, Object* item)

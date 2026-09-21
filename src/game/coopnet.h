@@ -85,6 +85,20 @@ void coopnet_on_client_pickup_click(int pid, int tile, int elevation);
 // limitation, see coopnet_host_process_action_queue() in coopnet.cc.
 void coopnet_on_client_use_click(int pid, int tile, int elevation);
 
+// Called from gmouse.cc when the local role is Client and the player uses a
+// skill (Lockpick, Steal, Traps, First Aid, Doctor, Science, Repair) on a
+// target: sends a skill request identifying the target by (pid, tile,
+// elevation), same reasoning as the pickup/use clicks above. Companion
+// stats/skills need no separate sync -- the companion shares obj_dude's own
+// pid (0x1000000), which proto_ptr() special-cases to a single shared
+// pc_proto struct, so SPECIAL stats, skill points, and level/experience are
+// already the same underlying data for both, not a copy.
+//
+// Takes the target Object* itself (not raw pid/tile/elevation) so it can
+// special-case `target == obj_dude` -- see CoopSkillRequest's comment in
+// coopnet.cc for why targeting the host's own character needs this.
+void coopnet_on_client_skill_use(int skill, Object* target);
+
 // Called from protinst.cc's obj_drop()/obj_pickup() right after they
 // succeed, for whichever object performed the action. No-ops unless
 // connected and `critter` is one of the two synced characters (obj_dude or
