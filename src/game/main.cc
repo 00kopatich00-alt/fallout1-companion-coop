@@ -83,6 +83,11 @@ static int main_selfrun_index = 0;
 // 0x505A7C
 static bool main_show_death_scene = false;
 
+void main_request_death_scene()
+{
+    main_show_death_scene = true;
+}
+
 // 0x614838
 static bool main_death_voiceover_done;
 
@@ -337,6 +342,13 @@ static void main_game_loop()
         }
 
         if ((obj_dude->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) != 0) {
+            // Coop: only ever meaningfully true on the host -- the client's
+            // own obj_dude is a pure position mirror (see
+            // coopnet_client_apply_position()'s comment) that nothing ever
+            // damages locally, since combat() is gated to no-op for the
+            // Client role. Tell the client before quitting, or its
+            // connection would just go silent with no explanation.
+            coopnet_notify_game_over(COOP_GAME_OVER_HOST_DIED);
             main_show_death_scene = 1;
             game_user_wants_to_quit = 2;
         }

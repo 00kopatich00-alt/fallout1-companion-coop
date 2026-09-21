@@ -10,6 +10,7 @@
 #include "game/combat.h"
 #include "game/combatai.h"
 #include "game/config.h"
+#include "game/coopnet.h"
 #include "game/critter.h"
 #include "game/cycle.h"
 #include "game/display.h"
@@ -1148,6 +1149,16 @@ int world_map(WorldMapContext ctx)
 
         while (!done) {
             sharedFpsLimiter.mark();
+
+            // Coop: this is its own separate blocking loop, same problem as
+            // gDialogProcess()/coopnet_combat_input() -- main_game_loop()
+            // never reaches its own coopnet_poll() call while the worldmap
+            // screen is open, so without this the connection would sit idle
+            // for however long the host spends traveling and could time out
+            // (kCoopHeartbeatTimeoutMs) on both ends. Worldmap travel is
+            // host-only (see scripts_request_worldmap()'s comment), so this
+            // is a no-op on the client, which never reaches here at all.
+            coopnet_poll();
 
             if (is_entering_random_encounter || is_entering_city || is_entering_random_terrain) {
                 break;

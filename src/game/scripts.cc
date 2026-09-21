@@ -8,6 +8,7 @@
 #include "game/actions.h"
 #include "game/automap.h"
 #include "game/combat.h"
+#include "game/coopnet.h"
 #include "game/critter.h"
 #include "game/elevator.h"
 #include "game/endgame.h"
@@ -986,6 +987,19 @@ int scripts_request_combat(STRUCT_664980* a1)
 // 0x4927D8
 void scripts_request_townmap()
 {
+    // Coop: worldmap/townmap travel is host-only by design, same reasoning
+    // as dialogue (see coopnet_notify_dialogue_state()'s comment in
+    // coopnet.cc) -- this is reachable purely from script logic (an exit
+    // grid's own proximity-triggered script calling the WorldMap/TownMap
+    // opcodes), which runs identically against the client's own mirrored
+    // obj_dude as it's moved to match the host, with no other guard on this
+    // path. Without this, the client could independently pop into its own
+    // local worldmap screen -- entirely unprompted, unsynced, and pointless
+    // since only the host's own travel actually matters.
+    if (coopnet_get_role() == CoopRole::Client) {
+        return;
+    }
+
     if (isInCombat()) {
         game_user_wants_to_quit = 1;
     }
@@ -996,6 +1010,11 @@ void scripts_request_townmap()
 // 0x492800
 void scripts_request_worldmap()
 {
+    // Coop: see scripts_request_townmap()'s comment just above.
+    if (coopnet_get_role() == CoopRole::Client) {
+        return;
+    }
+
     if (isInCombat()) {
         game_user_wants_to_quit = 1;
     }
