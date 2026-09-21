@@ -1,6 +1,8 @@
 #ifndef FALLOUT_GAME_COOPNET_H_
 #define FALLOUT_GAME_COOPNET_H_
 
+#include <cstdint>
+
 #include "game/object_types.h"
 
 namespace fallout {
@@ -141,6 +143,30 @@ void coopnet_on_client_attack(Object* target);
 // screen isn't responding to clicks except during the companion's own turn.
 void coopnet_notify_combat_begin();
 void coopnet_notify_combat_end();
+
+// Host-side only, called from gdialog.cc when the host starts/ends a
+// conversation with an NPC, and whenever the currently-displayed reply
+// text/option list changes during one. The client can never initiate or
+// affect dialogue itself -- see gmouse.cc's Client-role guard on the talk
+// click -- this exists purely so the client can watch, read-only, what the
+// host is doing (echoed into the client's own message log).
+void coopnet_notify_dialogue_begin();
+void coopnet_notify_dialogue_end();
+void coopnet_notify_dialogue_state(const char* replyText, const char* const* optionTexts, int optionCount);
+
+enum CoopGameOverReason : uint8_t {
+    COOP_GAME_OVER_HOST_DIED = 0,
+    COOP_GAME_OVER_COMPANION_DIED = 1,
+};
+
+// Host-side only, called from main.cc's own death check (when obj_dude --
+// the host's own character -- dies) and internally within coopnet.cc (when
+// the companion dies -- a shared game over by design: the companion dying
+// ends the session for both players, not just the host, same as the host's
+// own death would). Tells the client the shared game has ended and why,
+// before the host's own process quits to the main menu -- without this the
+// client's connection would just go silent with no explanation.
+void coopnet_notify_game_over(uint8_t reason);
 
 } // namespace fallout
 

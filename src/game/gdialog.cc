@@ -8,6 +8,7 @@
 #include "game/combat.h"
 #include "game/combatai.h"
 #include "game/critter.h"
+#include "game/coopnet.h"
 #include "game/cycle.h"
 #include "game/display.h"
 #include "game/game.h"
@@ -647,6 +648,16 @@ void gdialog_enter(Object* target, int a2)
     dialog_target = target;
     dialogue_just_started = 1;
 
+    // Coop: the whole visible conversation (every NPC line and options
+    // screen) plays out synchronously inside exec_script_proc() below, via
+    // gDialogGo()/gDialogProcess() -- see coopnet_notify_dialogue_state()'s
+    // hook in gDialogProcess() for the running commentary sent to the
+    // client. This call only ever runs on the host: the client is blocked
+    // from reaching gdialog_enter() at all (see gmouse.cc's Client-role
+    // guard on the talk click), by design -- only the host can affect
+    // dialogue.
+    coopnet_notify_dialogue_begin();
+
     if (target->sid != -1) {
         exec_script_proc(target->sid, SCRIPT_PROC_TALK);
     }
@@ -657,6 +668,7 @@ void gdialog_enter(Object* target, int a2)
         map_enable_bk_processes();
         scr_exec_map_update_scripts();
         dialog_state_fix = 0;
+        coopnet_notify_dialogue_end();
         return;
     }
 
@@ -665,6 +677,7 @@ void gdialog_enter(Object* target, int a2)
         map_enable_bk_processes();
         scr_exec_map_update_scripts();
         dialog_state_fix = 0;
+        coopnet_notify_dialogue_end();
         return;
     }
 
@@ -708,6 +721,7 @@ void gdialog_enter(Object* target, int a2)
     scr_exec_map_update_scripts();
 
     dialog_state_fix = 0;
+    coopnet_notify_dialogue_end();
 }
 
 // 0x43E0A0
@@ -1257,6 +1271,54 @@ int gDialogSayMessage()
 }
 
 // 0x43EBD8
+// Coop: gDialogProcess()'s loop below is its own separate blocking loop --
+// main_game_loop() (main.cc) never reaches its own coopnet_poll() call
+// while a conversation is open, exactly the same problem the companion's
+// combat turn had (see coopnet_combat_input()'s comment in coopnet.cc).
+// Called once per iteration: keeps the network alive, and relays the
+// currently-displayed reply/option text to the client whenever it visibly
+// changes (edge-triggered, not every frame, so the client's message log
+// doesn't get spammed with the same lines repeated ~10x/second).
+static void coopnet_dialogue_sync_tick()
+{
+    coopnet_poll();
+
+    if (coopnet_get_role() != CoopRole::Host || !coopnet_is_connected()) {
+        return;
+    }
+
+    static char lastReplyText[900] = "";
+    static char lastOptionText[DIALOG_OPTION_ENTRIES_CAPACITY][900];
+    static int lastOptionCount = -1;
+
+    bool changed = lastOptionCount != gdNumOptions || strcmp(lastReplyText, dialogBlock.replyText) != 0;
+    if (!changed) {
+        for (int i = 0; i < gdNumOptions; i++) {
+            if (strcmp(lastOptionText[i], dialogBlock.options[i].text) != 0) {
+                changed = true;
+                break;
+            }
+        }
+    }
+
+    if (!changed) {
+        return;
+    }
+
+    strncpy(lastReplyText, dialogBlock.replyText, sizeof(lastReplyText) - 1);
+    lastReplyText[sizeof(lastReplyText) - 1] = '\0';
+    lastOptionCount = gdNumOptions;
+
+    const char* optionTexts[DIALOG_OPTION_ENTRIES_CAPACITY];
+    for (int i = 0; i < gdNumOptions; i++) {
+        strncpy(lastOptionText[i], dialogBlock.options[i].text, sizeof(lastOptionText[i]) - 1);
+        lastOptionText[i][sizeof(lastOptionText[i]) - 1] = '\0';
+        optionTexts[i] = dialogBlock.options[i].text;
+    }
+
+    coopnet_notify_dialogue_state(dialogBlock.replyText, optionTexts, gdNumOptions);
+}
+
 static int gDialogProcess()
 {
     if (gdReenterLevel == 0) {
@@ -1282,6 +1344,8 @@ static int gDialogProcess()
     pageOffsets[0] = 0;
     for (;;) {
         sharedFpsLimiter.mark();
+
+        coopnet_dialogue_sync_tick();
 
         int keyCode = get_input();
 

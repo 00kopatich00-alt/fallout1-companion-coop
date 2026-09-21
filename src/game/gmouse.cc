@@ -958,7 +958,15 @@ void gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                         }
                     } else {
                         if (obj_action_can_talk_to(target)) {
-                            if (isInCombat()) {
+                            if (isInCombat() || coopnet_get_role() == CoopRole::Client) {
+                                // Coop: dialogue is host-only by design (see
+                                // coopnet_notify_dialogue_state()'s comment
+                                // in coopnet.cc) -- action_talk_to() would
+                                // otherwise run entirely against the
+                                // client's own independently-loaded, unsynced
+                                // copy of this NPC and its script/quest
+                                // state. Fall back to just examining them,
+                                // same as the existing in-combat case above.
                                 if (obj_examine(obj_dude, target) == -1) {
                                     obj_look_at(obj_dude, target);
                                 }
@@ -1191,7 +1199,15 @@ void gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                         }
                         break;
                     case GAME_MOUSE_ACTION_MENU_ITEM_TALK:
-                        action_talk_to(obj_dude, target);
+                        // Coop: dialogue is host-only by design -- same
+                        // reasoning as the arrow-cursor talk click above.
+                        if (coopnet_get_role() == CoopRole::Client) {
+                            if (obj_examine(obj_dude, target) == -1) {
+                                obj_look_at(obj_dude, target);
+                            }
+                        } else {
+                            action_talk_to(obj_dude, target);
+                        }
                         break;
                     case GAME_MOUSE_ACTION_MENU_ITEM_USE:
                         switch (FID_TYPE(target->fid)) {
