@@ -429,6 +429,22 @@ void game_exit()
 // 0x43B748
 int game_handle_input(int eventCode, bool isInCombatMode)
 {
+    // Coop: while the host's screen is shown to this client (remote screen),
+    // its input belongs to that screen -- forwarded by the frame hook -- and
+    // must not also act on the client's own game.
+    if (coopnet_client_remote_active()) {
+        return 0;
+    }
+
+    // Coop: while this client drives a conversation, its option clicks / digit
+    // keys go to the host as picks instead of being handled as hotkeys.
+    if (coopnet_client_dialogue_hover(eventCode)) {
+        return 0;
+    }
+    if (coopnet_on_client_dialogue_key(eventCode)) {
+        return 0;
+    }
+
     // NOTE: Uninline.
     if (game_state() == GAME_STATE_5) {
         dialogue_system_enter();
@@ -593,6 +609,10 @@ int game_handle_input(int eventCode, bool isInCombatMode)
         if (coopnet_get_role() == CoopRole::Client) {
             if (coopnet_is_companion_turn_active()) {
                 coopnet_on_client_attack(NULL);
+            } else if (!coopnet_is_client_in_synced_combat()) {
+                // No fight yet: like vanilla's A key outside combat, ask to
+                // start one (the host does the real work).
+                coopnet_on_client_start_combat(NULL);
             }
         } else if (intface_is_enabled()) {
             if (!isInCombatMode) {
@@ -1000,6 +1020,12 @@ int game_set_global_var(int var, int value)
     if (var < 0 || var >= num_game_global_vars) {
         debug_printf("ERROR: attempt to reference global var out of range: %d", var);
         return -1;
+    }
+
+    // Coop: on a connected client the host owns quest/story state -- see
+    // coopnet_client_ignores_local_gvar_writes().
+    if (coopnet_client_ignores_local_gvar_writes()) {
+        return 0;
     }
 
     game_global_vars[var] = value;

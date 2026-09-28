@@ -56,6 +56,7 @@ void combat_display(Attack* attack);
 void combat_anim_begin();
 void combat_anim_finished();
 int combat_check_bad_shot(Object* attacker, Object* defender, int hitMode, bool aiming);
+int combat_pick_called_shot(Object* target, int hitMode, int* hitLocation);
 bool combat_to_hit(Object* target, int* accuracy);
 void combat_attack_this(Object* a1);
 void combat_outline_on();

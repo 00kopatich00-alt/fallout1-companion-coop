@@ -8,6 +8,7 @@
 #include <math.h>
 
 #include "game/config.h"
+#include "game/coopnet.h"
 #include "game/gconfig.h"
 #include "game/gmouse.h"
 #include "game/light.h"
@@ -505,9 +506,19 @@ int tile_set_center(int tile, int flags)
             int tileScreenY;
             tile_coord(tile, &tileScreenX, &tileScreenY, map_elevation);
 
+            // Coop: the scroll limit is measured from the player's character.
+            // On a client, obj_dude is only the mirror of the HOST's character,
+            // so the client's camera could not be scrolled away from wherever
+            // the host stood ("client is tied to the host's location",
+            // confirmed via testing) -- measure from its own companion.
+            Object* scrollAnchor = obj_dude;
+            if (coopnet_get_role() == CoopRole::Client && coopnet_get_view_companion() != NULL) {
+                scrollAnchor = coopnet_get_view_companion();
+            }
+
             int dudeScreenX;
             int dudeScreenY;
-            tile_coord(obj_dude->tile, &dudeScreenX, &dudeScreenY, map_elevation);
+            tile_coord(scrollAnchor->tile, &dudeScreenX, &dudeScreenY, map_elevation);
 
             int dx = abs(dudeScreenX - tileScreenX);
             int dy = abs(dudeScreenY - tileScreenY);

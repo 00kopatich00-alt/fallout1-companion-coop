@@ -22,6 +22,7 @@
 #include "game/tile.h"
 #include "platform_compat.h"
 #include "plib/color/color.h"
+#include "plib/gnw/debug.h"
 #include "plib/gnw/gnw.h"
 #include "plib/gnw/grbuf.h"
 #include "plib/gnw/input.h"
@@ -719,7 +720,17 @@ void gmouse_bk_process()
                     }
                 }
             } else if (gmouse_3d_current_mode == GAME_MOUSE_MODE_CROSSHAIR) {
-                Object* pointedObject = object_under_mouse(OBJ_TYPE_CRITTER, false, map_elevation);
+                // Coop: object_under_mouse()'s second parameter, when false,
+                // unconditionally excludes obj_dude from ever being returned
+                // at all -- reasonable on a real single-player screen (you
+                // can't target yourself), but on the client's screen
+                // obj_dude is the host's character, not "self" (that's the
+                // companion) -- a legitimate deliberate-friendly-fire target
+                // per an explicit user request. Without this, obj_dude
+                // couldn't even be hovered/highlighted here, let alone
+                // clicked in the handler below.
+                bool canTargetHostDude = coopnet_get_role() == CoopRole::Client;
+                Object* pointedObject = object_under_mouse(OBJ_TYPE_CRITTER, canTargetHostDude, map_elevation);
                 if (pointedObject != NULL) {
                     int color;
                     int accuracy;
@@ -757,15 +768,25 @@ void gmouse_bk_process()
             return;
         }
 
+        // Coop: the hex-cursor's "can I get there / X" check measured the path
+        // from obj_dude -- on the client that's the HOST's character, so the
+        // client saw a red X for anywhere the host couldn't walk to, i.e. it
+        // seemed to depend on the host being nearby. The client moves its own
+        // companion, so measure from that.
+        Object* pathDude = obj_dude;
+        if (coopnet_get_role() == CoopRole::Client && coopnet_get_view_companion() != NULL) {
+            pathDude = coopnet_get_view_companion();
+        }
+
         char formattedActionPoints[8];
         int color;
-        int v6 = make_path(obj_dude, obj_dude->tile, obj_mouse_flat->tile, NULL, 1);
+        int v6 = make_path(pathDude, pathDude->tile, obj_mouse_flat->tile, NULL, 1);
         if (v6) {
             if (!isInCombat()) {
                 formattedActionPoints[0] = '\0';
                 color = colorTable[31744];
             } else {
-                int v7 = critter_compute_ap_from_distance(obj_dude, v6);
+                int v7 = critter_compute_ap_from_distance(pathDude, v6);
                 int v8;
                 if (v7 - combat_free_move >= 0) {
                     v8 = v7 - combat_free_move;
@@ -773,7 +794,7 @@ void gmouse_bk_process()
                     v8 = 0;
                 }
 
-                if (v8 <= obj_dude->data.critter.combat.ap) {
+                if (v8 <= pathDude->data.critter.combat.ap) {
                     snprintf(formattedActionPoints, sizeof(formattedActionPoints), "%d", v8);
                     color = colorTable[32767];
                 } else {
@@ -958,7 +979,13 @@ void gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                         }
                     } else {
                         if (obj_action_can_talk_to(target)) {
-                            if (isInCombat() || coopnet_get_role() == CoopRole::Client) {
+                            if (coopnet_get_role() == CoopRole::Client && !coopnet_is_client_in_synced_combat()) {
+                                // Coop: the client STARTS the conversation, so it
+                                // DRIVES it -- the host runs the one real
+                                // dialogue, with the companion as the speaker, and
+                                // just watches. See coopnet_on_client_talk_click().
+                                coopnet_on_client_talk_click(target);
+                            } else if (isInCombat() || coopnet_get_role() == CoopRole::Client) {
                                 // Coop: dialogue is host-only by design (see
                                 // coopnet_notify_dialogue_state()'s comment
                                 // in coopnet.cc) -- action_talk_to() would
@@ -973,6 +1000,10 @@ void gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                             } else {
                                 action_talk_to(obj_dude, target);
                             }
+                        } else if (coopnet_get_role() == CoopRole::Client) {
+                            // The companion loots it on the host; the client
+                            // drives the loot screen (remote screen).
+                            coopnet_on_client_loot_click(target);
                         } else {
                             action_loot_container(obj_dude, target);
                         }
@@ -1006,7 +1037,20 @@ void gmouse_handle_event(int mouseX, int mouseY, int mouseState)
         }
 
         if (gmouse_3d_current_mode == GAME_MOUSE_MODE_CROSSHAIR) {
-            Object* target = object_under_mouse(OBJ_TYPE_CRITTER, false, map_elevation);
+            // Coop: see the identical fix's comment on the hover-highlight
+            // call above -- without this, obj_dude could never even be
+            // returned as a click target here, regardless of anything
+            // downstream that allows attacking it.
+            bool canTargetHostDude = coopnet_get_role() == CoopRole::Client;
+            Object* target = object_under_mouse(OBJ_TYPE_CRITTER, canTargetHostDude, map_elevation);
+            if (coopnet_get_role() == CoopRole::Client && target == NULL) {
+                debug_printf("\nCoop: crosshair click found no critter under the cursor (mouse %d,%d)\n", mouseX, mouseY);
+            }
+            if (coopnet_get_role() == CoopRole::Client) {
+                debug_printf("\nCoop: client crosshair click target=%p (isHostDude=%d isCompanion=%d pid=%d) turnActive=%d syncedCombat=%d\n",
+                    (void*)target, target == obj_dude, target == coopnet_get_companion(), target != NULL ? target->pid : -1,
+                    coopnet_is_companion_turn_active(), coopnet_is_client_in_synced_combat());
+            }
             if (target != NULL) {
                 if (coopnet_get_role() == CoopRole::Client) {
                     // combat_attack_this() is deeply tied to obj_dude (reads
@@ -1017,8 +1061,35 @@ void gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                     // targeted attack request for the companion instead --
                     // resolved against the synced participant table
                     // host-side, see coopnet_on_client_attack()'s comment.
-                    if (coopnet_is_companion_turn_active()) {
+                    //
+                    // object_under_mouse() has no concept of "this is my own
+                    // side" -- on a real single-player screen you can't click
+                    // your own character, but the client's own companion
+                    // (its actual avatar) is an ordinary clickable critter
+                    // sprite on the client's screen just like anything else.
+                    // Confirmed via user testing as a real bug: clicking it
+                    // sent an attack request that isn't in the synced
+                    // participant table at all, so coopnet_on_client_attack()
+                    // resolved it to targetId=-1 ("unrecognized, auto-target")
+                    // -- which then let the host's own combat_ai() auto-target
+                    // fallback pick obj_dude (companion and obj_dude are, as
+                    // of the team-assignment fix, on the same team, so
+                    // nothing else caught this before it reached a real
+                    // attack). Only the companion itself is excluded --
+                    // clicking obj_dude is deliberate friendly fire, an
+                    // explicit user request, and is handled correctly now via
+                    // kCoopCombatTargetHostDude (coopnet.cc) instead of ever
+                    // reaching this ambiguous auto-target path.
+                    if (coopnet_is_companion_turn_active() && target != coopnet_get_companion()) {
                         coopnet_on_client_attack(target);
+                    } else if (!coopnet_is_client_in_synced_combat() && target != coopnet_get_companion() && target != obj_dude) {
+                        // No fight yet: clicking an enemy asks the host to
+                        // start one against it -- see
+                        // coopnet_host_apply_combat_start().
+                        coopnet_on_client_start_combat(target);
+                    } else if (coopnet_get_role() == CoopRole::Client) {
+                        debug_printf("\nCoop: crosshair click on pid=%d did nothing (turnActive=%d syncedCombat=%d isCompanion=%d isHostDude=%d)\n",
+                            target->pid, coopnet_is_companion_turn_active(), coopnet_is_client_in_synced_combat(), target == coopnet_get_companion(), target == obj_dude);
                     }
                 } else {
                     combat_attack_this(target);
@@ -1213,7 +1284,9 @@ void gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                         // Coop: dialogue is host-only by design -- same
                         // reasoning as the arrow-cursor talk click above.
                         if (coopnet_get_role() == CoopRole::Client) {
-                            if (obj_examine(obj_dude, target) == -1) {
+                            if (!coopnet_is_client_in_synced_combat()) {
+                                coopnet_on_client_talk_click(target);
+                            } else if (obj_examine(obj_dude, target) == -1) {
                                 obj_look_at(obj_dude, target);
                             }
                         } else {
@@ -1463,6 +1536,16 @@ int gmouse_3d_get_mode()
 void gmouse_3d_toggle_mode()
 {
     int mode = (gmouse_3d_current_mode + 1) % 3;
+
+    // Coop: the rules below key off this process's own local isInCombat(),
+    // which on a client is essentially never true (the real fight runs on the
+    // host) -- so the attack cursor was skipped entirely and the client could
+    // never get into attack mode to start or join a fight (the long-standing
+    // "client can't initiate combat"). The client may always pick any mode.
+    if (coopnet_get_role() == CoopRole::Client) {
+        gmouse_3d_set_mode(mode);
+        return;
+    }
 
     if (isInCombat()) {
         Object* item;
@@ -2488,6 +2571,15 @@ void gmouse_remove_item_outline(Object* object)
 
 void gameMouseRefreshImmediately()
 {
+    // Coop client: this callback fires from inside the host-ordered map_load()
+    // and redraws the whole scene while the object list is half built -- an
+    // object with a garbage pid then crashed the client (a render recursion
+    // through proto_load_pid, confirmed from a crash dump). Nothing needs
+    // repainting mid-load.
+    if (coopnet_client_map_loading()) {
+        return;
+    }
+
     gmouse_bk_process();
     renderPresent();
 }

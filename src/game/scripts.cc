@@ -787,7 +787,9 @@ int scripts_check_state()
         scriptState.requests &= ~SCRIPT_REQUEST_TOWN_MAP;
         ctx.state = 0;
         ctx.town = 0;
+        coopnet_travel_screen_begin();
         world_map(ctx);
+        coopnet_travel_screen_end();
         KillWorldWin();
     }
 
@@ -795,8 +797,10 @@ int scripts_check_state()
         scriptState.requests &= ~SCRIPT_REQUEST_WORLD_MAP;
         ctx.state = 0;
         ctx.town = our_town;
+        coopnet_travel_screen_begin();
         ctx = town_map(ctx);
         world_map(ctx);
+        coopnet_travel_screen_end();
         KillWorldWin();
     }
 
@@ -807,7 +811,16 @@ int scripts_check_state()
 
         scriptState.requests &= ~SCRIPT_REQUEST_ELEVATOR;
 
-        if (elevator_select(scriptState.elevatorType, &map, &elevation, &tile) != -1) {
+        // Coop: the elevator floor-select screen is another blocking modal
+        // loop like the world map/barter/loot screens -- without this the
+        // client's screen simply never showed it at all (confirmed by reading
+        // elevator_select(), a plain local get_input() loop with no coop hook
+        // anywhere near it).
+        coopnet_elevator_screen_begin();
+        bool elevatorPicked = elevator_select(scriptState.elevatorType, &map, &elevation, &tile) != -1;
+        coopnet_elevator_screen_end();
+
+        if (elevatorPicked) {
             automap_pip_save();
 
             if (map == map_data.field_34) {
@@ -815,6 +828,7 @@ int scripts_check_state()
                     register_clear(obj_dude);
                     obj_set_rotation(obj_dude, ROTATION_SE, 0);
                     obj_attempt_placement(obj_dude, tile, elevation, 0);
+                    coopnet_host_move_companion_with_dude();
                 } else {
                     Object* elevatorDoors = obj_find_first_at(obj_dude->elevation);
                     while (elevatorDoors != NULL) {
@@ -830,6 +844,7 @@ int scripts_check_state()
                     register_clear(obj_dude);
                     obj_set_rotation(obj_dude, ROTATION_SE, 0);
                     obj_attempt_placement(obj_dude, tile, elevation, 0);
+                    coopnet_host_move_companion_with_dude();
 
                     if (elevatorDoors != NULL) {
                         obj_set_frame(elevatorDoors, 0, NULL);
@@ -893,12 +908,20 @@ int scripts_check_state()
 
     if ((scriptState.requests & SCRIPT_REQUEST_LOOTING) != 0) {
         scriptState.requests &= ~SCRIPT_REQUEST_LOOTING;
-        loot_container(scriptState.lootingBy, scriptState.lootingFrom);
+        if (!coopnet_host_run_companion_loot(scriptState.lootingBy, scriptState.lootingFrom)) {
+            loot_container(scriptState.lootingBy, scriptState.lootingFrom);
+        }
     }
 
     if ((scriptState.requests & SCRIPT_REQUEST_STEALING) != 0) {
         scriptState.requests &= ~SCRIPT_REQUEST_STEALING;
-        inven_steal_container(scriptState.stealingBy, scriptState.stealingFrom);
+        if (scriptState.stealingBy == coopnet_get_companion()) {
+            if (!coopnet_host_run_companion_steal(scriptState.stealingBy, scriptState.stealingFrom)) {
+                coopnet_auto_resolve_companion_steal(scriptState.stealingBy, scriptState.stealingFrom);
+            }
+        } else {
+            inven_steal_container(scriptState.stealingBy, scriptState.stealingFrom);
+        }
     }
 
     return 0;
@@ -912,7 +935,11 @@ int scripts_check_state_in_combat()
         int elevation = map_elevation;
         int tile = -1;
 
-        if (elevator_select(scriptState.elevatorType, &map, &elevation, &tile) != -1) {
+        coopnet_elevator_screen_begin();
+        bool elevatorPicked = elevator_select(scriptState.elevatorType, &map, &elevation, &tile) != -1;
+        coopnet_elevator_screen_end();
+
+        if (elevatorPicked) {
             automap_pip_save();
 
             if (map == map_data.field_34) {
@@ -920,6 +947,7 @@ int scripts_check_state_in_combat()
                     register_clear(obj_dude);
                     obj_set_rotation(obj_dude, ROTATION_SE, 0);
                     obj_attempt_placement(obj_dude, tile, elevation, 0);
+                    coopnet_host_move_companion_with_dude();
                 } else {
                     Object* elevatorDoors = obj_find_first_at(obj_dude->elevation);
                     while (elevatorDoors != NULL) {
@@ -935,6 +963,7 @@ int scripts_check_state_in_combat()
                     register_clear(obj_dude);
                     obj_set_rotation(obj_dude, ROTATION_SE, 0);
                     obj_attempt_placement(obj_dude, tile, elevation, 0);
+                    coopnet_host_move_companion_with_dude();
 
                     if (elevatorDoors != NULL) {
                         obj_set_frame(elevatorDoors, 0, NULL);
@@ -961,7 +990,9 @@ int scripts_check_state_in_combat()
     }
 
     if ((scriptState.requests & SCRIPT_REQUEST_LOOTING) != 0) {
-        loot_container(scriptState.lootingBy, scriptState.lootingFrom);
+        if (!coopnet_host_run_companion_loot(scriptState.lootingBy, scriptState.lootingFrom)) {
+            loot_container(scriptState.lootingBy, scriptState.lootingFrom);
+        }
     }
 
     // NOTE: Uninline.
@@ -1025,6 +1056,13 @@ void scripts_request_worldmap()
 // 0x492828
 int scripts_request_elevator(int elevator)
 {
+    // Coop debug: confirms whether the elevator's own script logic ever
+    // actually runs this far at all for a companion-triggered use (vs. never
+    // being reached, e.g. because activation is a spatial trigger the
+    // companion doesn't fire, or a dude_obj check further up the script
+    // silently no-ops before this point).
+    debug_printf("\nCoop-debug: scripts_request_elevator(%d) called\n", elevator);
+
     scriptState.elevatorType = elevator;
     scriptState.requests |= SCRIPT_REQUEST_ELEVATOR;
 
@@ -1045,6 +1083,24 @@ int scripts_request_explosion(int tile, int elevation, int minDamage, int maxDam
 // 0x492868
 void scripts_request_dialog(Object* obj)
 {
+    // Coop: dialogue is host-only by design (see coopnet_notify_dialogue_state()'s
+    // comment in coopnet.cc and gmouse.cc's Client-role guard on the player's
+    // own "Talk" click) -- but this entry point isn't reachable from a player
+    // click at all. It's how a *script* starts a conversation on its own
+    // initiative (e.g. an NPC's own critter-tick logic deciding to greet or
+    // stop "the player"), which runs identically against the client's own
+    // independently-simulated copy of that NPC, with no other guard on this
+    // path. Without this, an NPC could open the real, full graphical dialogue
+    // screen directly on the client's machine -- something the client was
+    // never set up to run at all (no host-only conversation state behind it,
+    // just the read-only text mirror) -- confirmed via testing as a genuine
+    // crash: the client's screen would end up running gdialog_enter()'s real
+    // flow (portrait/head-sound loading included) concurrently with, and
+    // completely independent of, the host's actual conversation.
+    if (coopnet_get_role() == CoopRole::Client) {
+        return;
+    }
+
     scriptState.dialogTarget = obj;
     scriptState.requests |= SCRIPT_REQUEST_DIALOG;
 }
@@ -1085,6 +1141,11 @@ int exec_script_proc(int sid, int action)
 {
     if (!script_engine_running) {
         return -1;
+    }
+
+    if ((action == SCRIPT_PROC_CRITTER || action == SCRIPT_PROC_SPATIAL || action == SCRIPT_PROC_COMBAT)
+        && coopnet_client_freezes_local_scripts()) {
+        return 0;
     }
 
     Script* script;
@@ -2368,6 +2429,26 @@ bool scr_chk_spatials_in(Object* object, int tile, int elevation)
         return false;
     }
 
+    // Coop: two other fixes were already tried at the actual door
+    // (obj_use_door()'s dude_obj substitution, then a map-scoped refusal
+    // there) and confirmed via user testing to NOT stop the companion from
+    // passing the Vault 13 exit -- meaning the trigger almost certainly isn't
+    // a door/USE interaction at all, it's this: a plain "something is
+    // standing on this tile" script with no actor check of its own (vanilla
+    // never needed one -- only one character could ever be on a tile). This
+    // reinstates blocking it for the companion on V13ENT specifically (tried
+    // and reverted once already, out of concern it might also silence the
+    // vault's own elevator on the same map) -- logged below either way so the
+    // NEXT test tells us, instead of guessing again, whether the elevator's
+    // own trigger is one of the scripts caught by this on that map.
+    // Coop: was checking "V13ENT" -- confirmed WRONG via a fresh debug log
+    // (this exact function's own new logging showed "map=VAULT13.SAV" for
+    // every trigger the companion fired), which is why blocking it never
+    // actually took effect despite the block existing. See
+    // kNoClientExitMaps's comment in coopnet.cc for the full story.
+    bool coopCompanionSpatialBlock = coopnet_get_role() == CoopRole::Host && object == coopnet_get_companion()
+        && (strncmp(map_data.name, "VAULT13", 7) == 0 || strncmp(map_data.name, "V13ENT", 6) == 0);
+
     if (!scr_spatials_enabled()) {
         return false;
     }
@@ -2378,17 +2459,18 @@ bool scr_chk_spatials_in(Object* object, int tile, int elevation)
 
     script = scr_find_first_at(elevation);
     while (script != NULL) {
-        if (built_tile == script->sp.built_tile) {
-            // NOTE: Uninline.
-            scr_set_objs(script->scr_id, object, NULL);
-            exec_script_proc(script->scr_id, SCRIPT_PROC_SPATIAL);
-        } else {
-            if (script->sp.radius != 0) {
-                if (tile_in_tile_bound(builtTileGetTile(script->sp.built_tile), script->sp.radius, tile)) {
-                    // NOTE: Uninline.
-                    scr_set_objs(script->scr_id, object, NULL);
-                    exec_script_proc(script->scr_id, SCRIPT_PROC_SPATIAL);
+        bool hit = built_tile == script->sp.built_tile
+            || (script->sp.radius != 0 && tile_in_tile_bound(builtTileGetTile(script->sp.built_tile), script->sp.radius, tile));
+        if (hit) {
+            if (coopCompanionSpatialBlock) {
+                debug_printf("\nCoop-debug: companion spatial trigger on V13ENT BLOCKED, script sid=%d tile=%d\n", script->scr_id, tile);
+            } else {
+                if (object == coopnet_get_companion()) {
+                    debug_printf("\nCoop-debug: companion spatial trigger fired, script sid=%d tile=%d map=%.16s\n", script->scr_id, tile, map_data.name);
                 }
+                // NOTE: Uninline.
+                scr_set_objs(script->scr_id, object, NULL);
+                exec_script_proc(script->scr_id, SCRIPT_PROC_SPATIAL);
             }
         }
 

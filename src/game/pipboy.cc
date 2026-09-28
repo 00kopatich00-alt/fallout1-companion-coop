@@ -1,4 +1,5 @@
 #include "game/pipboy.h"
+#include "game/coopnet.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -2232,6 +2233,8 @@ static bool TimedRest(int hours, int minutes, int duration)
     win_draw(pip_win);
 
     gmouse_set_cursor(MOUSE_CURSOR_ARROW);
+
+    coopnet_on_client_rest_finished();
 
     return rc;
 }

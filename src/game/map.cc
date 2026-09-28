@@ -8,6 +8,7 @@
 #include "game/anim.h"
 #include "game/automap.h"
 #include "game/combat.h"
+#include "game/coopnet.h"
 #include "game/critter.h"
 #include "game/cycle.h"
 #include "game/editor.h"
@@ -854,6 +855,7 @@ void map_new_map()
 // 0x474614
 int map_load(char* file_name)
 {
+    CoopMapLoadScope coopScope;
     int rc;
     DB_FILE* stream;
     char* extension;
@@ -1264,6 +1266,7 @@ int map_check_state()
 
             ctx.state = 0;
             ctx.town = our_town;
+            coopnet_travel_screen_begin();
             ctx = town_map(ctx);
 
             if (ctx.state == -1) {
@@ -1271,6 +1274,7 @@ int map_check_state()
             }
 
             world_map(ctx);
+            coopnet_travel_screen_end();
             KillWorldWin();
             memset(&map_state, 0, sizeof(map_state));
         }
@@ -1279,12 +1283,15 @@ int map_check_state()
             anim_stop();
             ctx.state = 0;
             ctx.town = our_town;
+            coopnet_travel_screen_begin();
             world_map(ctx);
+            coopnet_travel_screen_end();
             KillWorldWin();
             memset(&map_state, 0, sizeof(map_state));
         }
     } else {
         if (!isInCombat()) {
+            CoopMapLoadScope coopScope; // covers the party placement after the load too
             // NOTE: Uninline.
             map_load_idx(map_state.map);
 
@@ -1304,6 +1311,15 @@ int map_check_state()
             town = xlate_mapidx_to_town(map_data.field_34);
             if (worldmap_script_jump(town, 0) == -1) {
                 debug_printf("\nError: couldn't make jump on worldmap for map jump!");
+            }
+
+            // Coop: keep "the town we are in" in step with the map we just
+            // entered. The exit-to-town-map screen is built from it, and after
+            // walking between a town's areas (e.g. Shady Sands -> the radscorpion
+            // den) it could still name a far-away town (Vault 13's map showed
+            // up when the client left the den).
+            if (town >= 0) {
+                our_town = town;
             }
         }
     }

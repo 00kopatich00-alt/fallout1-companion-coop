@@ -400,8 +400,32 @@ void handle_inventory()
         }
     }
 
-    if (isInCombat()) {
-        if (combat_whose_turn() != inven_dude) {
+    // isInCombat() reflects this process's own LOCAL simulation (NPCs run
+    // independently per side, see combat()'s own role-guard comment in
+    // combat.cc) -- on a coop client that's frequently false even while
+    // the real, host-authoritative fight is genuinely happening, since the
+    // client's own local world usually isn't independently "in combat" at
+    // the same moment. Confirmed via user testing as a real bug: with the
+    // check gated on isInCombat() alone, this whole combat-specific branch
+    // (both the turn gate below and the AP-cost block further down) was
+    // silently skipped on the client essentially every time, letting
+    // inventory open for free mid-fight. coopnet_is_client_in_synced_combat()
+    // is the real, synced signal instead.
+    bool clientSyncedCombat = coopnet_get_role() == CoopRole::Client && coopnet_is_client_in_synced_combat();
+
+    if (isInCombat() || clientSyncedCombat) {
+        // combat_whose_turn() reflects this process's own LOCAL combat
+        // state (combat_turn_obj, combat.cc) -- on a coop client that's
+        // never meaningful for the companion's real, network-driven turn
+        // (the client never runs a real combat_turn() cycle at all, see
+        // coopnet_combat_input()'s role guard in coopnet.cc), so it would
+        // essentially always reject this. coopnet_is_companion_turn_active()
+        // is the actual synced "is it my turn right now" state instead.
+        if (coopnet_get_role() == CoopRole::Client) {
+            if (!coopnet_is_companion_turn_active()) {
+                return;
+            }
+        } else if (combat_whose_turn() != inven_dude) {
             return;
         }
     }
@@ -410,7 +434,7 @@ void handle_inventory()
         return;
     }
 
-    if (isInCombat()) {
+    if (isInCombat() || clientSyncedCombat) {
         if (inven_dude == obj_dude) {
             int actionPointsRequired = 4 - perk_level(PERK_QUICK_POCKETS);
             if (actionPointsRequired > 0 && actionPointsRequired > obj_dude->data.critter.combat.ap) {
@@ -429,6 +453,34 @@ void handle_inventory()
 
             obj_dude->data.critter.combat.ap -= actionPointsRequired;
             intface_update_move_points(obj_dude->data.critter.combat.ap, combat_free_move);
+        } else if (coopnet_get_role() == CoopRole::Client && inven_dude == coopnet_get_companion()) {
+            // Same vanilla formula as obj_dude's own case just above --
+            // inven_dude's own combat.ap field is kept in sync with the
+            // real, host-authoritative value via the normal turn-AP
+            // broadcast (see COOP_MSG_COMBAT_TURN's handling in coopnet.cc),
+            // so this check is against a real, current number.
+            int actionPointsRequired = 4 - perk_level(PERK_QUICK_POCKETS);
+            if (actionPointsRequired > 0 && actionPointsRequired > inven_dude->data.critter.combat.ap) {
+                MessageListItem messageListItem;
+                messageListItem.num = 19;
+                if (message_search(&inventry_message_file, &messageListItem)) {
+                    display_print(messageListItem.text);
+                }
+
+                // NOTE: Uninline.
+                inven_exit();
+
+                return;
+            }
+
+            // Only the host's own companion object is authoritative for
+            // AP -- this just asks the host to apply the exact same
+            // deduction there. The host re-broadcasts the real resulting
+            // value afterward (coopnet_combat_input()'s own diff loop),
+            // which is what actually keeps inven_dude->...combat.ap and
+            // the on-screen pips correct going forward; no local
+            // prediction here to avoid the two ever disagreeing.
+            coopnet_on_client_open_companion_inventory();
         }
     }
 
@@ -529,12 +581,19 @@ void handle_inventory()
         }
     }
 
+    bool clientCompanionInventory = coopnet_get_role() == CoopRole::Client && inven_dude != NULL && inven_dude == coopnet_get_companion();
+
     exit_inventory(isoWasEnabled);
 
     // NOTE: Uninline.
     inven_exit();
 
     if (inven_dude == obj_dude) {
+        intface_update_items(false);
+    }
+
+    if (clientCompanionInventory) {
+        coopnet_on_client_inventory_closed();
         intface_update_items(false);
     }
 }

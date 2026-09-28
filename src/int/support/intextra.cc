@@ -883,6 +883,13 @@ static void op_dude_obj(Program* program)
                     self->pid, script->action, obj_dist(self, companion), obj_dist(self, obj_dude));
             }
         }
+
+        // A conversation the CLIENT started is with the companion, not with
+        // the host's character: every dialogue script asks DUDE_OBJ who it's
+        // talking to (reaction, skill/stat checks, quest items, karma).
+        if (coopnet_dialogue_driven_by_client()) {
+            result = companion;
+        }
     }
 
     programStackPushPointer(program, result);
@@ -2310,9 +2317,20 @@ static void op_dialogue_system_enter(Program* program)
         return;
     }
 
+    // Coop: a script in the client's own independent copy of the world must
+    // not switch the client into dialogue mode -- see gDialogGo()'s comment
+    // in gdialog.cc.
+    if (coopnet_get_role() == CoopRole::Client) {
+        return;
+    }
+
     if (game_state_request(GAME_STATE_4) == -1) {
         return;
     }
+
+    // Coop: whoever the NPC walked up to drives -- see
+    // coopnet_mark_dialogue_client_initiated().
+    coopnet_mark_dialogue_client_initiated(self);
 
     dialog_target = scr_find_obj_from_program(program);
 }

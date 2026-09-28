@@ -5,6 +5,7 @@
 
 #include "game/anim.h"
 #include "game/combat.h"
+#include "game/coopnet.h"
 #include "game/gconfig.h"
 #include "game/item.h"
 #include "game/map.h"
@@ -1157,6 +1158,11 @@ int gsound_play_sfx_file_volume(const char* a1, int a2)
 // 0x448A0C
 Sound* gsound_load_sound(const char* name, Object* object)
 {
+    // Coop: every sound effect made on the host's own screen while the client
+    // watches or drives it (world map clicks, picking up / dropping inventory
+    // items, barter, loot) is played on the client too.
+    coopnet_notify_screen_sfx(name);
+
     if (!gsound_initialized) {
         return NULL;
     }

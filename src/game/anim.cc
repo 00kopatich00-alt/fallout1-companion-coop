@@ -7,6 +7,7 @@
 #include "game/combat.h"
 #include "game/combat_defs.h"
 #include "game/combatai.h"
+#include "game/coopnet.h"
 #include "game/critter.h"
 #include "game/display.h"
 #include "game/game.h"
@@ -594,7 +595,7 @@ int anim_busy(Object* a1)
 // 0x413A3C
 int register_object_move_to_object(Object* owner, Object* destination, int actionPoints, int delay)
 {
-    if (check_registry(owner) == -1 || actionPoints == 0) {
+    if (check_registry(owner) == -1 || actionPoints == 0 || coopnet_block_local_move(owner)) {
         anim_cleanup();
         return -1;
     }
@@ -627,7 +628,7 @@ int register_object_move_to_object(Object* owner, Object* destination, int actio
 // 0x413B48
 int register_object_run_to_object(Object* owner, Object* destination, int actionPoints, int delay)
 {
-    if (check_registry(owner) == -1 || actionPoints == 0) {
+    if (check_registry(owner) == -1 || actionPoints == 0 || coopnet_block_local_move(owner)) {
         anim_cleanup();
         return -1;
     }
@@ -667,7 +668,7 @@ int register_object_run_to_object(Object* owner, Object* destination, int action
 // 0x413CDC
 int register_object_move_to_tile(Object* owner, int tile, int elevation, int actionPoints, int delay)
 {
-    if (check_registry(owner) == -1 || actionPoints == 0) {
+    if (check_registry(owner) == -1 || actionPoints == 0 || coopnet_block_local_move(owner)) {
         anim_cleanup();
         return -1;
     }
@@ -695,13 +696,16 @@ int register_object_move_to_tile(Object* owner, int tile, int elevation, int act
 
     curr_anim_counter++;
 
+    // Coop: see coopnet_notify_move()'s comment.
+    coopnet_notify_move(owner, tile, elevation, false);
+
     return 0;
 }
 
 // 0x413DE8
 int register_object_run_to_tile(Object* owner, int tile, int elevation, int actionPoints, int delay)
 {
-    if (check_registry(owner) == -1 || actionPoints == 0) {
+    if (check_registry(owner) == -1 || actionPoints == 0 || coopnet_block_local_move(owner)) {
         anim_cleanup();
         return -1;
     }
@@ -736,6 +740,10 @@ int register_object_run_to_tile(Object* owner, int tile, int elevation, int acti
     }
 
     curr_anim_counter++;
+
+    // Coop: see coopnet_notify_move()'s comment. `anim` was just resolved
+    // to walk or run above (crippled legs / sneaking downgrade a run).
+    coopnet_notify_move(owner, tile, elevation, animationDescription->anim == ANIM_RUNNING);
 
     return 0;
 }
@@ -1329,6 +1337,10 @@ int register_object_outline(Object* object, bool outline, int delay)
 // 0x414EB4
 int register_object_play_sfx(Object* owner, const char* soundEffectName, int delay)
 {
+    // Coop: mirror the attacker's own attack sounds (punch swing, gunshot,
+    // contact) to the client, which replays the animations but not their sound.
+    coopnet_notify_attack_sfx(owner, soundEffectName, delay);
+
     if (check_registry(owner) == -1) {
         anim_cleanup();
         return -1;
@@ -1730,7 +1742,19 @@ static bool anim_can_use_door(Object* critter, Object* door)
     int body_type;
     Proto* door_proto;
 
-    if (critter == obj_dude) {
+    // Coop: excludes the companion too, same as obj_dude -- confirmed via
+    // user testing to be the correct fix for "doors have no collision for the
+    // companion" (it was silently auto-opening and passing through any
+    // unlocked door mid-walk, exactly like an ordinary NPC, with no click
+    // needed -- see object_move(), which calls obj_use_door() directly the
+    // instant this returns true). A misread of the user's own confirmation
+    // ("can't walk through doors anymore") as a regression report briefly
+    // reverted this; it wasn't one, collision was the intended, correct
+    // result. The Vault 13 exit's own extra block (obj_use_door(),
+    // scr_chk_spatials_in()) stays alongside this, unrelated -- that one
+    // refuses the companion the door/trigger entirely, everywhere else this
+    // just requires the same explicit click obj_dude itself needs.
+    if (critter == obj_dude || critter == coopnet_get_companion()) {
         return false;
     }
 
@@ -1771,6 +1795,23 @@ int make_path(Object* object, int from, int to, unsigned char* rotations, int a5
 // 0x4159E8
 int make_path_func(Object* object, int from, int to, unsigned char* rotations, int a5, PathBuilderCallback* callback)
 {
+    // Coop: defensive bounds check -- from/to index directly into the
+    // fixed-size seen[HEX_GRID_SIZE/8] buffer below (seen[from/8], etc.)
+    // with no validation. A script commanding some object to path
+    // to/from an invalid tile (e.g. an object that isn't currently placed
+    // on the map at all, tile == -1, or any other out-of-[0,HEX_GRID_SIZE)
+    // value) reads/writes out of bounds of that buffer -- confirmed via a
+    // real crash dump (WinDbg/cdb on a saved %LOCALAPPDATA%\CrashDumps\
+    // minidump) as STATUS_ACCESS_VIOLATION inside this function, reached
+    // through a background NPC script's AnimateMoveObjToTile opcode. This
+    // is vanilla code with no such guard; adding one here rather than only
+    // at whichever specific caller turned out to pass the bad tile, since
+    // nothing about this function can ever legitimately want to path
+    // to/from a nonexistent tile.
+    if (!hexGridTileIsValid(from) || !hexGridTileIsValid(to)) {
+        return 0;
+    }
+
     if (a5) {
         if (callback(object, to, object->elevation) != NULL) {
             return 0;

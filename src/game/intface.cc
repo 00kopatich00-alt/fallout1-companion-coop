@@ -9,6 +9,7 @@
 #include "game/art.h"
 #include "game/combat.h"
 #include "game/config.h"
+#include "game/coopnet.h"
 #include "game/critter.h"
 #include "game/cycle.h"
 #include "game/display.h"
@@ -38,6 +39,23 @@
 #include "plib/gnw/text.h"
 
 namespace fallout {
+
+// Coop: the character this interface bar belongs to. On the client that's the
+// companion (their own played character); obj_dude there is only a read-only
+// mirror of the HOST's character. The item slots, hand switching, reload and
+// action-point checks all used obj_dude, so the client's bar showed the
+// host's SMG and switching hands made the HOST's character put his weapon
+// away (confirmed via testing). Host and solo play are unchanged.
+static Object* intface_dude()
+{
+    if (coopnet_get_role() == CoopRole::Client) {
+        Object* companion = coopnet_get_view_companion();
+        if (companion != NULL) {
+            return companion;
+        }
+    }
+    return obj_dude;
+}
 
 // The width of connectors in the indicator box.
 //
@@ -1089,8 +1107,25 @@ void intface_update_hit_points(bool animate)
         return;
     }
 
-    int hp = critter_get_hits(obj_dude);
-    int maxHp = stat_level(obj_dude, STAT_MAXIMUM_HIT_POINTS);
+    // Coop: this readout is meant to show "my own current HP" -- on the
+    // client, that's the companion (their actual played character), not
+    // the mirrored obj_dude (a read-only copy of the host's character).
+    // Redirecting here, rather than adding a separate companion-specific
+    // display function, covers every existing call site (including
+    // intface_redraw()'s own unconditional call) without needing to find
+    // and update each one individually. Confirmed via user testing as a
+    // real, explicit ask: "I want the actual health points on the ui to
+    // change" for the companion specifically, not just a log message.
+    Object* critter = obj_dude;
+    if (coopnet_get_role() == CoopRole::Client) {
+        Object* companion = coopnet_get_view_companion();
+        if (companion != NULL) {
+            critter = companion;
+        }
+    }
+
+    int hp = critter_get_hits(critter);
+    int maxHp = stat_level(critter, STAT_MAXIMUM_HIT_POINTS);
 
     int red = (int)((double)maxHp * 0.25);
     int yellow = (int)((double)maxHp * 0.5);
@@ -1166,7 +1201,7 @@ void intface_update_ac(bool animate)
     // 0x50561C
     static int last_ac = 0;
 
-    int armorClass = stat_level(obj_dude, STAT_ARMOR_CLASS);
+    int armorClass = stat_level(intface_dude(), STAT_ARMOR_CLASS);
 
     int delay = 0;
     if (animate) {
@@ -1261,7 +1296,7 @@ int intface_update_items(bool animated)
     Object* oldCurrentItem = itemButtonItems[itemCurrentItem].item;
 
     InterfaceItemState* leftItemState = &(itemButtonItems[HAND_LEFT]);
-    Object* item1 = inven_left_hand(obj_dude);
+    Object* item1 = inven_left_hand(intface_dude());
     if (item1 == leftItemState->item && leftItemState->item != NULL) {
         if (leftItemState->item != NULL) {
             leftItemState->isDisabled = item_grey(item1);
@@ -1290,7 +1325,7 @@ int intface_update_items(bool animated)
 
     InterfaceItemState* rightItemState = &(itemButtonItems[HAND_RIGHT]);
 
-    Object* item2 = inven_right_hand(obj_dude);
+    Object* item2 = inven_right_hand(intface_dude());
     if (item2 == rightItemState->item && rightItemState->item != NULL) {
         if (rightItemState->item != NULL) {
             rightItemState->isDisabled = item_grey(rightItemState->item);
@@ -1328,7 +1363,7 @@ int intface_update_items(bool animated)
                 }
             }
 
-            intface_change_fid_animate((obj_dude->fid & 0xF000) >> 12, animationCode);
+            intface_change_fid_animate((intface_dude()->fid & 0xF000) >> 12, animationCode);
 
             return 0;
         }
@@ -1348,6 +1383,15 @@ int intface_toggle_items(bool animated)
 
     itemCurrentItem = 1 - itemCurrentItem;
 
+    if (coopnet_get_role() == CoopRole::Client) {
+        // Tell the host which hand the companion now wields (before the local
+        // animation, so the host's position broadcasts stop overwriting the
+        // look mid-switch). Also logs who is being animated, to chase the
+        // "host puts away his SMG" report.
+        debug_printf("\nCoop: client hand switch -> slot %d, animating %p (obj_dude=%p)\n", itemCurrentItem, (void*)intface_dude(), (void*)obj_dude);
+        coopnet_on_client_inventory_closed();
+    }
+
     if (animated) {
         Object* item = itemButtonItems[itemCurrentItem].item;
         int animationCode = 0;
@@ -1357,7 +1401,7 @@ int intface_toggle_items(bool animated)
             }
         }
 
-        intface_change_fid_animate((obj_dude->fid & 0xF000) >> 12, animationCode);
+        intface_change_fid_animate((intface_dude()->fid & 0xF000) >> 12, animationCode);
     } else {
         intface_redraw_items();
     }
@@ -1389,7 +1433,7 @@ int intface_toggle_item_state()
                 done = true;
                 break;
             case INTERFACE_ITEM_ACTION_PRIMARY_AIMING:
-                if (item_w_called_shot(obj_dude, itemState->primaryHitMode)) {
+                if (item_w_called_shot(intface_dude(), itemState->primaryHitMode)) {
                     done = true;
                 }
                 break;
@@ -1404,7 +1448,7 @@ int intface_toggle_item_state()
                 if (itemState->secondaryHitMode != HIT_MODE_PUNCH
                     && itemState->secondaryHitMode != HIT_MODE_KICK
                     && item_w_subtype(itemState->item, itemState->secondaryHitMode) != ATTACK_TYPE_NONE
-                    && item_w_called_shot(obj_dude, itemState->secondaryHitMode)) {
+                    && item_w_called_shot(intface_dude(), itemState->secondaryHitMode)) {
                     done = true;
                 }
                 break;
@@ -1443,15 +1487,15 @@ void intface_use_item()
                     ? HIT_MODE_LEFT_WEAPON_RELOAD
                     : HIT_MODE_RIGHT_WEAPON_RELOAD;
 
-                int actionPointsRequired = item_mp_cost(obj_dude, hitMode, false);
-                if (actionPointsRequired <= obj_dude->data.critter.combat.ap) {
+                int actionPointsRequired = item_mp_cost(intface_dude(), hitMode, false);
+                if (actionPointsRequired <= intface_dude()->data.critter.combat.ap) {
                     if (intface_item_reload() == 0) {
-                        if (actionPointsRequired > obj_dude->data.critter.combat.ap) {
-                            obj_dude->data.critter.combat.ap = 0;
+                        if (actionPointsRequired > intface_dude()->data.critter.combat.ap) {
+                            intface_dude()->data.critter.combat.ap = 0;
                         } else {
-                            obj_dude->data.critter.combat.ap -= actionPointsRequired;
+                            intface_dude()->data.critter.combat.ap -= actionPointsRequired;
                         }
-                        intface_update_move_points(obj_dude->data.critter.combat.ap, combat_free_move);
+                        intface_update_move_points(intface_dude()->data.critter.combat.ap, combat_free_move);
                     }
                 }
             } else {
@@ -1461,7 +1505,14 @@ void intface_use_item()
             gmouse_set_cursor(MOUSE_CURSOR_CROSSHAIR);
             gmouse_3d_set_mode(GAME_MOUSE_MODE_CROSSHAIR);
             if (!isInCombat()) {
-                combat(NULL);
+                // Coop: the client never runs combat() itself (see its guard
+                // in combat.cc) -- clicking the weapon slot, vanilla's way of
+                // starting a fight, asks the host to start one instead.
+                if (coopnet_get_role() == CoopRole::Client) {
+                    coopnet_on_client_start_combat(NULL);
+                } else {
+                    combat(NULL);
+                }
             }
         }
     } else if (proto_action_can_use_on(ptr->item->pid)) {
@@ -1469,20 +1520,20 @@ void intface_use_item()
         gmouse_3d_set_mode(GAME_MOUSE_MODE_USE_CROSSHAIR);
     } else if (proto_action_can_use(ptr->item->pid)) {
         if (isInCombat()) {
-            int actionPointsRequired = item_mp_cost(obj_dude, ptr->secondaryHitMode, false);
-            if (actionPointsRequired <= obj_dude->data.critter.combat.ap) {
-                obj_use_item(obj_dude, ptr->item);
+            int actionPointsRequired = item_mp_cost(intface_dude(), ptr->secondaryHitMode, false);
+            if (actionPointsRequired <= intface_dude()->data.critter.combat.ap) {
+                obj_use_item(intface_dude(), ptr->item);
                 intface_update_items(false);
-                if (actionPointsRequired > obj_dude->data.critter.combat.ap) {
-                    obj_dude->data.critter.combat.ap = 0;
+                if (actionPointsRequired > intface_dude()->data.critter.combat.ap) {
+                    intface_dude()->data.critter.combat.ap = 0;
                 } else {
-                    obj_dude->data.critter.combat.ap -= actionPointsRequired;
+                    intface_dude()->data.critter.combat.ap -= actionPointsRequired;
                 }
 
-                intface_update_move_points(obj_dude->data.critter.combat.ap, combat_free_move);
+                intface_update_move_points(intface_dude()->data.critter.combat.ap, combat_free_move);
             }
         } else {
-            obj_use_item(obj_dude, ptr->item);
+            obj_use_item(intface_dude(), ptr->item);
             intface_update_items(false);
         }
     }
@@ -1751,7 +1802,7 @@ static int intface_redraw_items()
                     art_ptr_unlock(useTextFrmHandle);
                 }
 
-                actionPoints = item_mp_cost(obj_dude, itemState->primaryHitMode, false);
+                actionPoints = item_mp_cost(intface_dude(), itemState->primaryHitMode, false);
             }
         } else {
             int primaryFid = -1;
@@ -1774,7 +1825,7 @@ static int intface_redraw_items()
                 hitMode = itemState->secondaryHitMode;
                 break;
             case INTERFACE_ITEM_ACTION_RELOAD:
-                actionPoints = item_mp_cost(obj_dude, itemCurrentItem == HAND_LEFT ? HIT_MODE_LEFT_WEAPON_RELOAD : HIT_MODE_RIGHT_WEAPON_RELOAD, false);
+                actionPoints = item_mp_cost(intface_dude(), itemCurrentItem == HAND_LEFT ? HIT_MODE_LEFT_WEAPON_RELOAD : HIT_MODE_RIGHT_WEAPON_RELOAD, false);
                 primaryFid = art_id(OBJ_TYPE_INTERFACE, 291, 0, 0, 0);
                 break;
             }
@@ -1800,10 +1851,10 @@ static int intface_redraw_items()
             }
 
             if (hitMode != -1) {
-                actionPoints = item_w_mp_cost(obj_dude, hitMode, bullseyeFid != -1);
+                actionPoints = item_w_mp_cost(intface_dude(), hitMode, bullseyeFid != -1);
 
                 int id;
-                int anim = item_w_anim(obj_dude, hitMode);
+                int anim = item_w_anim(intface_dude(), hitMode);
                 switch (anim) {
                 case ANIM_THROW_PUNCH:
                 case ANIM_KICK_LEG:
@@ -1951,23 +2002,23 @@ static void intface_change_fid_animate(int previousWeaponAnimationCode, int weap
 {
     intface_fid_is_changing = true;
 
-    register_clear(obj_dude);
+    register_clear(intface_dude());
     register_begin(ANIMATION_REQUEST_RESERVED);
-    register_object_light(obj_dude, 4, 0);
+    register_object_light(intface_dude(), 4, 0);
 
     if (previousWeaponAnimationCode != 0) {
-        const char* sfx = gsnd_build_character_sfx_name(obj_dude, ANIM_PUT_AWAY, CHARACTER_SOUND_EFFECT_UNUSED);
-        register_object_play_sfx(obj_dude, sfx, 0);
-        register_object_animate(obj_dude, ANIM_PUT_AWAY, 0);
+        const char* sfx = gsnd_build_character_sfx_name(intface_dude(), ANIM_PUT_AWAY, CHARACTER_SOUND_EFFECT_UNUSED);
+        register_object_play_sfx(intface_dude(), sfx, 0);
+        register_object_animate(intface_dude(), ANIM_PUT_AWAY, 0);
     }
 
     register_object_must_call(NULL, NULL, (AnimationCallback*)intface_redraw_items_callback, -1);
 
     if (weaponAnimationCode != 0) {
-        register_object_take_out(obj_dude, weaponAnimationCode, -1);
+        register_object_take_out(intface_dude(), weaponAnimationCode, -1);
     } else {
-        int fid = art_id(OBJ_TYPE_CRITTER, obj_dude->fid & 0xFFF, ANIM_STAND, 0, obj_dude->rotation + 1);
-        register_object_change_fid(obj_dude, fid, -1);
+        int fid = art_id(OBJ_TYPE_CRITTER, intface_dude()->fid & 0xFFF, ANIM_STAND, 0, intface_dude()->rotation + 1);
+        register_object_change_fid(intface_dude(), fid, -1);
     }
 
     register_object_must_call(NULL, NULL, (AnimationCallback*)intface_change_fid_callback, -1);
@@ -2173,7 +2224,7 @@ static int intface_item_reload()
     }
 
     bool v0 = false;
-    while (item_w_try_reload(obj_dude, itemButtonItems[itemCurrentItem].item) != -1) {
+    while (item_w_try_reload(intface_dude(), itemButtonItems[itemCurrentItem].item) != -1) {
         v0 = true;
     }
 

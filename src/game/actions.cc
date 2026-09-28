@@ -7,6 +7,7 @@
 #include "game/combat.h"
 #include "game/combatai.h"
 #include "game/config.h"
+#include "game/coopnet.h"
 #include "game/critter.h"
 #include "game/display.h"
 #include "game/game.h"
@@ -262,6 +263,14 @@ static int internal_destroy(Object* a1, Object* a2)
 // 0x410810
 void show_damage_to_object(Object* defender, int damage, int flags, Object* weapon, bool hit_from_front, int knockback_distance, int knockback_rotation, int a8, Object* attacker, int delay)
 {
+    // Coop: this is the engine's single choke point for playing a
+    // critter's damage-reaction animation (every caller -- show_damage(),
+    // show_damage_target(), show_damage_extras() -- funnels through here),
+    // driven entirely by already-decided outcome data, so it's the exact
+    // right place to mirror to the client. No-op unless defender is the
+    // companion or obj_dude -- see coopnet_notify_damage_anim()'s comment.
+    coopnet_notify_damage_anim(defender, damage, flags, hit_from_front, knockback_distance, knockback_rotation, a8, attacker, delay);
+
     int anim;
     int fid;
     const char* sfx_name;
@@ -553,11 +562,23 @@ int action_attack(Attack* attack)
     }
 
     int anim = item_w_anim(attack->attacker, attack->hitMode);
+
+    // Coop: action_attack() is the single dispatcher every attack in the
+    // game funnels through (melee or ranged), so this is the one place to
+    // mirror the attacker's swing/point/fire animation to the client. No-op
+    // unless the attacker is the companion or obj_dude -- see
+    // coopnet_notify_attack_anim()'s comment.
+    coopnet_notify_attack_anim(attack->attacker, anim);
+
+    coopnet_begin_attack_sfx(attack->attacker);
+    int rc;
     if (anim < ANIM_FIRE_SINGLE && anim != ANIM_THROW_ANIM) {
-        return action_melee(attack, anim);
+        rc = action_melee(attack, anim);
     } else {
-        return action_ranged(attack, anim);
+        rc = action_ranged(attack, anim);
     }
+    coopnet_end_attack_sfx();
+    return rc;
 }
 
 // 0x4111C4
@@ -1057,6 +1078,13 @@ int a_use_obj(Object* a1, Object* a2, Object* a3)
         anim = ANIM_MAGIC_HANDS_MIDDLE;
     }
 
+    // Coop: mirrors the companion's/obj_dude's reach-and-use gesture to the
+    // client -- a_use_obj() is the single function both action_use_an_object()
+    // and action_use_an_item_on_object() funnel through, and this is the
+    // exact anim code it's about to play locally. No-op unless a1 is the
+    // companion or obj_dude -- see coopnet_notify_object_anim()'s comment.
+    coopnet_notify_object_anim(a1, anim);
+
     register_object_animate(a1, anim, -1);
 
     if (a3 != NULL) {
@@ -1124,6 +1152,11 @@ int action_get_an_object(Object* critter, Object* item)
     proto_ptr(item->pid, &itemProto);
 
     if (itemProto->item.type != ITEM_TYPE_CONTAINER || proto_action_can_pickup(item->pid)) {
+        // Coop: mirrors the companion's/obj_dude's pickup gesture to the
+        // client. No-op unless critter is the companion or obj_dude -- see
+        // coopnet_notify_object_anim()'s comment.
+        coopnet_notify_object_anim(critter, ANIM_MAGIC_HANDS_GROUND);
+
         register_object_animate(critter, ANIM_MAGIC_HANDS_GROUND, 0);
 
         int fid = art_id(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, ANIM_MAGIC_HANDS_GROUND, (critter->fid & 0xF000) >> 12, critter->rotation + 1);
@@ -1156,6 +1189,12 @@ int action_get_an_object(Object* critter, Object* item)
         int anim = (itemProto->item.data.container.openFlags & 0x01) == 0
             ? ANIM_MAGIC_HANDS_MIDDLE
             : ANIM_MAGIC_HANDS_GROUND;
+
+        // Coop: mirrors the companion's/obj_dude's container-open gesture
+        // to the client. No-op unless critter is the companion or obj_dude
+        // -- see coopnet_notify_object_anim()'s comment.
+        coopnet_notify_object_anim(critter, anim);
+
         register_object_animate(critter, anim, 0);
 
         int fid = art_id(OBJ_TYPE_CRITTER, critter->fid & 0xFFF, anim, 0, critter->rotation + 1);
@@ -1358,6 +1397,14 @@ int action_use_skill_on(Object* a1, Object* a2, int skill)
     int anim = (FID_TYPE(a2->fid) == OBJ_TYPE_CRITTER && critter_is_prone(a2))
         ? ANIM_MAGIC_HANDS_GROUND
         : ANIM_MAGIC_HANDS_MIDDLE;
+
+    // Coop: mirrors the companion's/obj_dude's skill-use gesture (steal,
+    // first aid, lockpick, etc.) to the client -- action_use_skill_on() is
+    // the single function all of those funnel through. No-op unless a1 is
+    // the companion or obj_dude -- see coopnet_notify_object_anim()'s
+    // comment.
+    coopnet_notify_object_anim(a1, anim);
+
     int fid = art_id(OBJ_TYPE_CRITTER, a1->fid & 0xFFF, anim, 0, a1->rotation + 1);
 
     CacheEntry* artHandle;
@@ -1710,7 +1757,20 @@ static int report_explosion(Attack* attack, Object* a2)
     }
 
     death_checks(attack);
+
+    // Coop: mirrors this exact combat_display() call's real text (miss,
+    // hit, damage amount, critical, death -- whatever it decides to print)
+    // to the client, verbatim, whenever the companion is involved. See
+    // coopnet_begin_capture_combat_text()'s comment.
+    bool coopCaptureCombatText = attack->attacker == coopnet_get_companion() || attack->defender == coopnet_get_companion();
+    if (coopCaptureCombatText) {
+        coopnet_begin_capture_combat_text();
+    }
     combat_display(attack);
+    if (coopCaptureCombatText) {
+        coopnet_end_capture_combat_text();
+    }
+
     apply_damage(attack, false);
 
     Object* anyDefender = NULL;
@@ -1802,7 +1862,9 @@ static int compute_explosion_damage(int min, int max, Object* a3, int* a4)
 // 0x4130A8
 int action_talk_to(Object* a1, Object* a2)
 {
-    if (a1 != obj_dude) {
+    // Coop: the client's companion walks over and talks, exactly like the host's
+    // own character does when clicking an NPC from afar.
+    if (a1 != obj_dude && a1 != coopnet_get_companion()) {
         return -1;
     }
 
@@ -1810,9 +1872,9 @@ int action_talk_to(Object* a1, Object* a2)
         return -1;
     }
 
-    int anim = FID_ANIM_TYPE(obj_dude->fid);
+    int anim = FID_ANIM_TYPE(a1->fid);
     if (anim == ANIM_WALK || anim == ANIM_RUNNING) {
-        register_clear(obj_dude);
+        register_clear(a1);
     }
 
     if (isInCombat()) {
@@ -1854,6 +1916,11 @@ static int can_talk_to(Object* a1, Object* a2)
 // 0x413200
 static int talk_to(Object* a1, Object* a2)
 {
+    // Coop: the client's companion reached the NPC -- the client drives this
+    // conversation (the host watches).
+    if (a1 != obj_dude && a1 == coopnet_get_companion()) {
+        coopnet_note_companion_reached_npc();
+    }
     scripts_request_dialog(a2);
     return 0;
 }
@@ -1930,7 +1997,17 @@ void action_dmg(int tile, int elevation, int minDamage, int maxDamage, int damag
 // 0x4133B4
 static int report_dmg(Attack* attack, Object* a2)
 {
+    // Coop: see the identical wrap's comment on the other combat_display()
+    // call site above.
+    bool coopCaptureCombatText = attack->attacker == coopnet_get_companion() || attack->defender == coopnet_get_companion();
+    if (coopCaptureCombatText) {
+        coopnet_begin_capture_combat_text();
+    }
     combat_display(attack);
+    if (coopCaptureCombatText) {
+        coopnet_end_capture_combat_text();
+    }
+
     apply_damage(attack, false);
     mem_free(attack);
     game_ui_enable();

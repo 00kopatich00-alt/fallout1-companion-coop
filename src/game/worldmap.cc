@@ -937,7 +937,7 @@ int load_world_map(DB_FILE* stream)
 // than 9000 instructions.
 //
 // 0x4AA360
-int world_map(WorldMapContext ctx)
+static int world_map_impl(WorldMapContext ctx)
 {
     const char* title;
     const char* text;
@@ -1159,6 +1159,14 @@ int world_map(WorldMapContext ctx)
             // host-only (see scripts_request_worldmap()'s comment), so this
             // is a no-op on the client, which never reaches here at all.
             coopnet_poll();
+
+            // Coop: lets the client's read-only worldmap-mirror overlay show
+            // rough progress (terrain + moving/stopped) while the host
+            // travels -- diffed internally against the last state actually
+            // sent, so this is cheap to call unconditionally every
+            // iteration. See coopnet_notify_worldmap_state()'s comment in
+            // coopnet.cc.
+            coopnet_notify_worldmap_state(WorldTerraTable[world_ypos / 50][world_xpos / 50], is_moving != 0);
 
             if (is_entering_random_encounter || is_entering_city || is_entering_random_terrain) {
                 break;
@@ -2312,6 +2320,23 @@ int world_map(WorldMapContext ctx)
 
         return 0;
     }
+}
+
+// Thin public wrapper around world_map_impl() (the original, unmodified
+// vanilla function -- renamed rather than edited in place, since it has 15
+// separate return points and threading a coop notify call through each of
+// them would be much easier to get wrong). Lets the client know the host
+// is watchable-but-not-drivable on the world map screen for the whole
+// duration of the call, regardless of which of those 15 paths it exits
+// through -- see coopnet_notify_worldmap_begin()/_end()'s comment in
+// coopnet.h. No-op on the client, which never reaches this screen at all
+// (see scripts_request_worldmap()'s comment).
+int world_map(WorldMapContext ctx)
+{
+    coopnet_notify_worldmap_begin();
+    int rc = world_map_impl(ctx);
+    coopnet_notify_worldmap_end();
+    return rc;
 }
 
 // 0x4AC860

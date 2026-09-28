@@ -1149,7 +1149,7 @@ char** windowWordWrap(char* string, int maxLength, int a3, int* substringListLen
             v1 += text_spacing();
             pch++;
         } else {
-            while (v1 > maxLength) {
+            while (v1 > maxLength && pch > start) {
                 v1 -= text_char_width(*pch);
                 pch--;
             }
@@ -1158,6 +1158,16 @@ char** windowWordWrap(char* string, int maxLength, int a3, int* substringListLen
                 while (pch != start && *pch != ' ') {
                     pch--;
                 }
+            }
+
+            // Coop (found via a hung intro movie, confirmed with a live stack):
+            // if nothing fits -- a single glyph wider than the box -- pch is
+            // back at `start`, the emitted substring is empty and `start`
+            // never moves, so this loop reallocated the list forever (the
+            // game froze at 100% CPU in the intro's subtitles). Always take
+            // at least one character.
+            if (pch == start && *pch != '\n' && *pch != '\0') {
+                pch++;
             }
 
             if (substringList != NULL) {
@@ -1171,6 +1181,13 @@ char** windowWordWrap(char* string, int maxLength, int a3, int* substringListLen
             substring[pch - start] = '\0';
 
             substringList[substringListLength] = substring;
+
+            // Coop: a newline that ended this line must be consumed too, or
+            // the next pass sees the same '\n' at `start` again and emits
+            // empty lines forever (localized subtitle files contain them).
+            if (*pch == '\n') {
+                pch++;
+            }
 
             while (*pch == ' ') {
                 pch++;

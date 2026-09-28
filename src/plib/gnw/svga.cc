@@ -1,5 +1,6 @@
 #include "plib/gnw/svga.h"
 
+#include "game/coopnet.h"
 #include "plib/gnw/gnw.h"
 #include "plib/gnw/grbuf.h"
 #include "plib/gnw/mouse.h"
@@ -227,6 +228,10 @@ void handleWindowSizeChanged()
 
 void renderPresent()
 {
+    // Coop remote screen: on the host, stream this frame to the driving
+    // client; on the client, draw the host's screen instead of our own.
+    coopnet_remote_screen_frame_hook();
+
     SDL_UpdateTexture(gSdlTexture, NULL, gSdlTextureSurface->pixels, gSdlTextureSurface->pitch);
     SDL_RenderClear(gSdlRenderer);
     SDL_RenderCopy(gSdlRenderer, gSdlTexture, NULL, NULL);

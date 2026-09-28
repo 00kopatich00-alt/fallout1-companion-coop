@@ -1419,9 +1419,47 @@ int obj_move_to_tile(Object* obj, int tile, int elevation, Rect* rect)
     // Known limitation: the companion can no longer trigger a transition by
     // itself; only the host's own character walking through an exit brings
     // both players along.
-    if (obj == obj_dude && coopnet_get_role() != CoopRole::Client) {
+    // Coop: roof hiding (tile_fill_roof) and the see-through "egg" around the
+    // viewpoint character used to live inside the exit-transition guard
+    // above, so on the client they never ran at all -- the client never saw
+    // roofs open when walking into a building (confirmed via testing). The
+    // client's viewpoint is its own played character, the companion; on the
+    // host (or solo) it stays obj_dude. Only the exit-transition check
+    // itself stays host-only.
+    bool coopIsClient = coopnet_get_role() == CoopRole::Client;
+
+    // Coop: the client walks its companion onto an exit grid it clicked on
+    // (host-side pathing, so unreachable exits -- behind a locked door -- stay
+    // unreachable): that is the client leading the party out of the location.
+    if (!coopIsClient && obj != obj_dude && obj == coopnet_get_companion()) {
+        for (ObjectListNode* n = objectTable[tile]; n != NULL; n = n->next) {
+            Object* o = n->obj;
+            if (elevation < o->elevation) {
+                break;
+            }
+            if (elevation == o->elevation && FID_TYPE(o->fid) == OBJ_TYPE_MISC && o->pid >= 0x5000010 && o->pid <= 0x5000017) {
+                bool allowed = coopnet_host_companion_exit_allowed(tile);
+                debug_printf("\nCoop: companion stepped on an exit grid, tile=%d allowed=%d\n", tile, allowed);
+                if (!allowed) {
+                    break;
+                }
+                MapTransition transition;
+                memset(&transition, 0, sizeof(transition));
+                transition.map = o->data.misc.map;
+                transition.tile = o->data.misc.tile;
+                transition.elevation = o->data.misc.elevation;
+                transition.rotation = o->data.misc.rotation;
+                coopnet_note_client_led_exit();
+                map_leave_map(&transition);
+                break;
+            }
+        }
+    }
+
+    Object* coopViewpoint = coopIsClient ? coopnet_get_view_companion() : obj_dude;
+    if (obj == coopViewpoint) {
         ObjectListNode* objectListNode = objectTable[tile];
-        while (objectListNode != NULL) {
+        while (!coopIsClient && objectListNode != NULL) {
             Object* obj = objectListNode->obj;
             int elev = obj->elevation;
             if (elevation < elev) {
@@ -1474,6 +1512,15 @@ int obj_move_to_tile(Object* obj, int tile, int elevation, Rect* rect)
                 if (rect != NULL) {
                     rect_min_bound(rect, &scr_size, rect);
                 }
+
+                // Coop: the client's companion is moved by network-driven
+                // animations whose dirty rect doesn't always get fully
+                // repainted -- confirmed via testing, a chunk of the roof
+                // stayed drawn until the mouse passed over it. Repaint the
+                // whole view outright when the roof state flips.
+                if (coopIsClient) {
+                    tile_refresh_display();
+                }
             }
 
             obj_last_roof_x = roofX;
@@ -1493,7 +1540,7 @@ int obj_move_to_tile(Object* obj, int tile, int elevation, Rect* rect)
         if (elevation != oldElevation) {
             map_set_elevation(elevation);
             tile_set_center(tile, TILE_SET_CENTER_REFRESH_WINDOW | TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS);
-            if (isInCombat()) {
+            if (isInCombat() && !coopIsClient) {
                 game_user_wants_to_quit = 1;
             }
         }
@@ -1504,6 +1551,48 @@ int obj_move_to_tile(Object* obj, int tile, int elevation, Rect* rect)
     }
 
     return 0;
+}
+
+// Coop: reveals (or re-covers) the roof around an arbitrary tile the same way
+// obj_move_to_tile() does for the viewpoint character. A conversation the
+// client started happens where the client's companion is, which can be a
+// building the host's own character isn't in -- the roof there stayed drawn
+// over the speaker, so "none of the players see who they are talking to"
+// (confirmed via testing). Called with the speaker's tile when such a
+// conversation begins and with the host's own tile when it ends.
+void obj_coop_focus_roof(int tile, int elevation)
+{
+    if (tile < 0 || !elevationIsValid(elevation) || square[elevation] == NULL) {
+        return;
+    }
+
+    int roofX = tile % 200 / 2;
+    int roofY = tile / 200 / 2;
+    if (roofX == obj_last_roof_x && roofY == obj_last_roof_y && elevation == obj_last_elev) {
+        return;
+    }
+
+    int currentSquare = square[elevation]->field_0[roofX + 100 * roofY];
+    int currentSquareFid = art_id(OBJ_TYPE_TILE, (currentSquare >> 16) & 0xFFF, 0, 0, 0);
+    int previousSquare = obj_last_roof_x != -1 && obj_last_roof_y != -1
+        ? square[elevation]->field_0[obj_last_roof_x + 100 * obj_last_roof_y]
+        : 0;
+    bool isEmpty = art_id(OBJ_TYPE_TILE, 1, 0, 0, 0) == currentSquareFid;
+
+    if (isEmpty != obj_last_is_empty || (((currentSquare >> 16) & 0xF000) >> 12) != (((previousSquare >> 16) & 0xF000) >> 12)) {
+        if (!obj_last_is_empty) {
+            tile_fill_roof(obj_last_roof_x, obj_last_roof_y, elevation, true);
+        }
+        if (!isEmpty) {
+            tile_fill_roof(roofX, roofY, elevation, false);
+        }
+        tile_refresh_display();
+    }
+
+    obj_last_roof_x = roofX;
+    obj_last_roof_y = roofY;
+    obj_last_elev = elevation;
+    obj_last_is_empty = isEmpty;
 }
 
 // 0x47C588
