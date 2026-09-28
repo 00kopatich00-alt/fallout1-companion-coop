@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "game/coopnet.h"
 #include "game/cycle.h"
 #include "game/game.h"
 #include "game/gconfig.h"
@@ -190,6 +191,17 @@ int gmovie_play(int game_movie, int game_movie_flags)
     int v11 = 0;
     int buttons;
     do {
+        // Coop: this is its own separate blocking loop, same problem as
+        // gDialogProcess()/world_map()/coopnet_combat_input() -- a cutscene
+        // can run for a real stretch of time (the vault-water-running-out
+        // movies, the intro, etc.) with main_game_loop() never reaching its
+        // own coopnet_poll() call the whole while, risking a heartbeat
+        // timeout/disconnect and, at minimum, a backlog of stale queued
+        // position updates that all land at once the moment the movie ends
+        // (visible as a burst of glitchy catch-up movement). Every other
+        // long-running blocking screen already needed this same fix.
+        coopnet_poll();
+
         if (!moviePlaying() || game_user_wants_to_quit || get_input() != -1) {
             break;
         }

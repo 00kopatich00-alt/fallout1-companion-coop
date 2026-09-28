@@ -4184,7 +4184,22 @@ void combat_anim_finished()
         }
 
         if (combat_call_display) {
+            // Coop: this is the main attack-resolution call site (fires after
+            // every combat animation finishes) -- the two wraps in
+            // actions.cc only cover secondary paths (called shots/explosion
+            // follow-up), so almost all real combat text (hits, misses,
+            // crits, deaths) was going out through here, uncaptured, leaving
+            // the client's log empty during ordinary attacks. Same wrap as
+            // those two sites -- see coopnet_begin_capture_combat_text()'s
+            // comment.
+            bool coopCaptureCombatText = main_ctd.attacker == coopnet_get_companion() || main_ctd.defender == coopnet_get_companion();
+            if (coopCaptureCombatText) {
+                coopnet_begin_capture_combat_text();
+            }
             combat_display(&main_ctd);
+            if (coopCaptureCombatText) {
+                coopnet_end_capture_combat_text();
+            }
             combat_call_display = false;
         }
 
@@ -4489,6 +4504,13 @@ static int get_called_shot_location(Object* critter, int* hit_location, int hit_
     return 0;
 }
 
+// Coop client: opens the vanilla called-shot picker for a (mirrored) target.
+// Returns -1 if the player cancelled.
+int combat_pick_called_shot(Object* target, int hitMode, int* hitLocation)
+{
+    return get_called_shot_location(target, hitLocation, hitMode);
+}
+
 // 0x423C2C
 int combat_check_bad_shot(Object* attacker, Object* defender, int hitMode, bool aiming)
 {
@@ -4547,11 +4569,30 @@ bool combat_to_hit(Object* target, int* accuracy)
         return false;
     }
 
-    if (combat_check_bad_shot(obj_dude, target, hitMode, aiming) != COMBAT_BAD_SHOT_OK) {
+    // Coop client: the character that attacks is the companion, not the
+    // mirrored host character -- range/AP/accuracy must be measured from it
+    // (the cursor showed a red X on targets the click could really hit).
+    Object* attacker = obj_dude;
+    if (coopnet_get_role() == CoopRole::Client) {
+        Object* companion = coopnet_get_view_companion();
+        if (companion != NULL) {
+            attacker = companion;
+        }
+    }
+
+    int rc = combat_check_bad_shot(attacker, target, hitMode, aiming);
+    if (rc == COMBAT_BAD_SHOT_OUT_OF_RANGE && attacker != obj_dude) {
+        // Coop client: clicking a far target makes the companion walk up to it
+        // and attack, so show the chance it will have (ignoring range) instead
+        // of a red X that the click then contradicts.
+        *accuracy = determine_to_hit_no_range(attacker, target, HIT_LOCATION_UNCALLED, hitMode);
+        return true;
+    }
+    if (rc != COMBAT_BAD_SHOT_OK) {
         return false;
     }
 
-    *accuracy = determine_to_hit(obj_dude, target, HIT_LOCATION_UNCALLED, hitMode);
+    *accuracy = determine_to_hit(attacker, target, HIT_LOCATION_UNCALLED, hitMode);
 
     return true;
 }
@@ -4674,16 +4715,35 @@ void combat_outline_on()
         return;
     }
 
+    // Coop: obj_dude is excluded below since a player can't target
+    // themselves, but vanilla never anticipated a second player-controlled
+    // character existing at all -- the companion fell through as an
+    // ordinary critter, getting the same default OUTLINE_TYPE_HOSTILE
+    // (red) treatment as any random hostile creature, which is what made
+    // the client see their own avatar outlined red "like an enemy".
+    // Excluded the same way obj_dude already is, on both branches, for
+    // both roles (not just the client -- the host's own screen has the
+    // identical bug for the same reason).
+    //
+    // obj_dude's own exclusion, on the other hand, only makes sense on the
+    // host (that's genuinely "yourself" there) -- on the client's screen
+    // obj_dude is the host's character, a legitimate deliberate-friendly-
+    // fire target per an explicit user request (object_under_mouse()'s
+    // call sites in gmouse.cc were fixed the same way, to actually let it
+    // be clicked at all). Left excluded on the host.
+    Object* coopCompanion = coopnet_get_companion();
+    bool excludeHostDude = coopnet_get_role() != CoopRole::Client;
+
     if (isInCombat()) {
         for (index = 0; index < list_total; index++) {
-            if (combat_list[index] != obj_dude && (combat_list[index]->data.critter.combat.results & DAM_DEAD) == 0) {
+            if ((combat_list[index] != obj_dude || !excludeHostDude) && combat_list[index] != coopCompanion && (combat_list[index]->data.critter.combat.results & DAM_DEAD) == 0) {
                 obj_turn_on_outline(combat_list[index], NULL);
             }
         }
     } else {
         critters_length = obj_create_list(-1, map_elevation, OBJ_TYPE_CRITTER, &critters);
         for (index = 0; index < critters_length; index++) {
-            if (critters[index] != obj_dude && (critters[index]->data.critter.combat.results & DAM_DEAD) == 0) {
+            if ((critters[index] != obj_dude || !excludeHostDude) && critters[index] != coopCompanion && (critters[index]->data.critter.combat.results & DAM_DEAD) == 0) {
                 outline_type = OUTLINE_TYPE_HOSTILE;
                 if (perk_level(PERK_FRIENDLY_FOE)) {
                     if (critters[index]->data.critter.combat.team == obj_dude->data.critter.combat.team) {

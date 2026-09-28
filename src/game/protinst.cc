@@ -848,6 +848,14 @@ int protinst_use_item(Object* critter, Object* item)
     int rc;
     MessageListItem messageListItem;
 
+    // Coop client: the client's character is the companion, whose real
+    // inventory and stats live on the HOST -- using an item locally only
+    // changed the client's mirror (stealth boy invisible on the host, drugs
+    // not applied). The host does the real use and re-syncs.
+    if (coopnet_client_forward_item_use(critter, item, NULL)) {
+        return 0;
+    }
+
     switch (item_get_type(item)) {
     case ITEM_TYPE_DRUG:
         rc = -1;
@@ -982,6 +990,10 @@ static int protinst_default_use_item(Object* a1, Object* a2, Object* item)
 // 0x48B394
 int protinst_use_item_on(Object* a1, Object* a2, Object* item)
 {
+    if (coopnet_client_forward_item_use(a1, item, a2)) {
+        return 0;
+    }
+
     int messageId = -1;
     int criticalChanceModifier = 0;
     int skill = -1;
@@ -1162,7 +1174,16 @@ int obj_use(Object* a1, Object* a2)
     }
 
     if (obj_sid(a2, &sid) != -1) {
-        scr_set_objs(sid, a1, a2);
+        // Coop: same reasoning as obj_use_door()'s identical fix -- a scenery
+        // object's own script (elevator controls are the concrete case: "client
+        // can't activate elevators himself", confirmed to be this, not the
+        // remote-screen streaming, since the SCRIPT_REQUEST_ELEVATOR flag this
+        // is supposed to raise via a builtin opcode was never even getting set)
+        // frequently checks who's using it against dude_obj specifically. The
+        // companion isn't obj_dude, so those checks silently failed and the
+        // script did nothing at all.
+        Object* scriptUser = (a1 != obj_dude && a1 == coopnet_get_companion()) ? obj_dude : a1;
+        scr_set_objs(sid, scriptUser, a2);
         exec_script_proc(sid, SCRIPT_PROC_USE);
 
         Script* script;
@@ -1292,13 +1313,32 @@ int obj_use_door(Object* a1, Object* a2, int a3)
     int sid = -1;
     bool scriptOverrides = false;
 
+    // Coop: a map-wide "the companion can't open ANY door on VAULT13" block
+    // used to live here, aimed at just the vault's own exit door -- reverted,
+    // confirmed via user testing to be too broad: it silently refused every
+    // ordinary door on that whole map too (confirmed via the debug log this
+    // block itself printed: it was firing for multiple different door pids at
+    // different tiles as the companion walked around, not just one specific
+    // door), so the companion lost the ability to open ANY door anywhere
+    // inside the vault, not just the exit -- worse than the original bug. The
+    // Vault 13 exit itself is handled by scr_chk_spatials_in()'s block
+    // instead (scripts.cc), which is scoped to the actual "you've left"
+    // trigger tile, not every door on the map. Doors -- including the vault's
+    // own -- now open normally for the companion everywhere, same as any
+    // ordinary door; only walking past the specific exit trigger is refused.
     if (obj_is_locked(a2)) {
         const char* sfx = gsnd_build_open_sfx_name(a2, SCENERY_SOUND_EFFECT_LOCKED);
         gsound_play_sfx_file(sfx);
     }
 
     if (obj_sid(a2, &sid) != -1) {
-        scr_set_objs(sid, a1, a2);
+        // Coop: door scripts (the Vault 13 door, quest-locked doors) decide
+        // whether "the player" may pass by looking at who used the door -- the
+        // client's companion isn't obj_dude, so it walked straight through
+        // doors the host's character is not allowed through. The companion is
+        // the player's party: ask the script as the host's character would.
+        Object* scriptUser = (a1 != obj_dude && a1 == coopnet_get_companion()) ? obj_dude : a1;
+        scr_set_objs(sid, scriptUser, a2);
         exec_script_proc(sid, SCRIPT_PROC_USE);
 
         Script* script;
@@ -1313,10 +1353,12 @@ int obj_use_door(Object* a1, Object* a2, int a3)
         int start;
         int end;
         int step;
+        bool willOpen;
         if (a2->frame != 0) {
             start = 1;
             end = (a3 == 0) - 1;
             step = -1;
+            willOpen = false;
         } else {
             if (a2->data.scenery.door.openFlags & 0x01) {
                 return -1;
@@ -1325,7 +1367,18 @@ int obj_use_door(Object* a1, Object* a2, int a3)
             start = 0;
             end = (a3 != 0) + 1;
             step = 1;
+            willOpen = true;
         }
+
+        // Coop: the companion/obj_dude opening or closing a door only ever
+        // happens on the host's authoritative world -- the client's own
+        // independently-loaded copy of the same door object never finds
+        // out otherwise. Mirrors the resulting state (identified by
+        // pid/tile/elevation, same convention as item pickup/drop) so the
+        // client can play the same real open/close animation via
+        // obj_open()/obj_close() -- see coopnet_notify_scenery_state()'s
+        // comment.
+        coopnet_notify_scenery_state(a2, willOpen);
 
         register_begin(ANIMATION_REQUEST_RESERVED);
 

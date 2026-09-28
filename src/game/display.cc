@@ -4,6 +4,7 @@
 
 #include "game/art.h"
 #include "game/combat.h"
+#include "game/coopnet.h"
 #include "game/gmouse.h"
 #include "game/gsound.h"
 #include "game/intface.h"
@@ -191,6 +192,12 @@ void display_print(char* str)
 {
     // 0x56E2E8
     static unsigned int lastTime;
+
+    // Coop: cheap no-op outside the narrow combat_display() capture window
+    // (see coopnet_begin_capture_combat_text()'s comment) -- this is the
+    // single hook point that lets the client see the host's real combat
+    // text verbatim instead of a generic placeholder.
+    coopnet_capture_display_print(str);
 
     if (!disp_init) {
         return;

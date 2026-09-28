@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "game/coopnet.h"
 #include "game/gconfig.h"
 #include "game/object.h"
 #include "game/tile.h"
@@ -189,6 +190,13 @@ int text_object_create(Object* object, char* string, int font, int color, int a5
     if (!text_object_initialized) {
         return -1;
     }
+
+    // Coop: single choke point for every floating message -- host mirrors it
+    // to the client, a connected client only shows the ones the host sent.
+    if (coopnet_client_blocks_local_float_text()) {
+        return -1;
+    }
+    coopnet_notify_float_text(object, string, font, color, a5);
 
     if (text_object_index >= TEXT_OBJECTS_MAX_COUNT - 1) {
         return -1;

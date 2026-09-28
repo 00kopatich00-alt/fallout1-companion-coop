@@ -15,6 +15,7 @@
 #include "game/gmouse.h"
 #include "game/gsound.h"
 #include "game/intface.h"
+#include "game/inventry.h"
 #include "game/item.h"
 #include "game/lip_sync.h"
 #include "game/message.h"
@@ -147,6 +148,7 @@ static void reply_arrow_down(int btn, int keyCode);
 static void reply_arrow_restore(int btn, int keyCode);
 static void gDialogProcessHighlight(int index);
 static void gDialogProcessUnHighlight(int index);
+static void coopnet_dialogue_sync_reset();
 static void gDialogProcessReply();
 static void gDialogProcessUpdate();
 static int gDialogProcessExit();
@@ -597,6 +599,12 @@ void gdialog_enter(Object* target, int a2)
 {
     gdDialogWentOff = false;
 
+    // Coop: see gDialogGo()'s comment -- the client must never enter a real
+    // dialogue itself.
+    if (coopnet_get_role() == CoopRole::Client) {
+        return;
+    }
+
     if (isInCombat()) {
         return;
     }
@@ -605,7 +613,11 @@ void gdialog_enter(Object* target, int a2)
         return;
     }
 
-    if (PID_TYPE(target->pid) != OBJ_TYPE_ITEM && SID_TYPE(target->sid) != SCRIPT_TYPE_SPATIAL) {
+    // Coop: these visibility/distance checks are measured from obj_dude, the
+    // host's character. When the client asked to talk, the speaker is the
+    // companion and the range was already checked against it when the request
+    // was accepted (coopnet_host_apply_dialogue_start()).
+    if (PID_TYPE(target->pid) != OBJ_TYPE_ITEM && SID_TYPE(target->sid) != SCRIPT_TYPE_SPATIAL && !coopnet_dialogue_driven_by_client()) {
         MessageListItem messageListItem;
 
         if (make_path_func(obj_dude, obj_dude->tile, target->tile, NULL, 0, obj_sight_blocking_at) == 0) {
@@ -656,6 +668,7 @@ void gdialog_enter(Object* target, int a2)
     // from reaching gdialog_enter() at all (see gmouse.cc's Client-role
     // guard on the talk click), by design -- only the host can affect
     // dialogue.
+    coopnet_dialogue_sync_reset();
     coopnet_notify_dialogue_begin();
 
     if (target->sid != -1) {
@@ -673,6 +686,8 @@ void gdialog_enter(Object* target, int a2)
     }
 
     if (script->scriptOverrides || dialogue_state != 4) {
+        debug_printf("\nCoop: conversation with pid=%d never opened (scriptOverrides=%d dialogue_state=%d drivenByClient=%d)\n",
+            target->pid, script->scriptOverrides ? 1 : 0, dialogue_state, coopnet_dialogue_driven_by_client() ? 1 : 0);
         dialogue_just_started = 0;
         map_enable_bk_processes();
         scr_exec_map_update_scripts();
@@ -721,6 +736,13 @@ void gdialog_enter(Object* target, int a2)
     scr_exec_map_update_scripts();
 
     dialog_state_fix = 0;
+
+    // Coop: put the roof back to what the host's own character sees (see
+    // the matching obj_coop_focus_roof() call when the conversation began).
+    if (coopnet_get_role() == CoopRole::Host) {
+        obj_coop_focus_roof(obj_dude->tile, obj_dude->elevation);
+    }
+
     coopnet_notify_dialogue_end();
 }
 
@@ -844,6 +866,24 @@ int scr_dialogue_init(int headFid, int reaction)
 
     gdDialogWentOff = true;
 
+    // Coop: tells the client to bring up its own real visual dialogue
+    // puppet (background/frame/portrait, see
+    // coopnet_client_begin_dialogue_visual() below) -- no-ops on the
+    // client itself (not Host) when this same function runs there as
+    // part of that puppet, and no-ops entirely if not connected. See
+    // coopnet_notify_dialogue_visual_begin()'s comment in coopnet.h for
+    // why this fires here rather than alongside coopnet_notify_dialogue_begin()
+    // in gdialog_enter().
+    // Coop: a conversation the client started is where the client's companion
+    // is, possibly inside a building the host's own character isn't in -- take
+    // the roof off the speaker so the head-less "who am I talking to" view
+    // actually shows them (see obj_coop_focus_roof()'s comment).
+    if (dialog_target != NULL && coopnet_dialogue_driven_by_client()) {
+        obj_coop_focus_roof(dialog_target->tile, dialog_target->elevation);
+    }
+
+    coopnet_notify_dialogue_visual_begin(headFid, reaction);
+
     return 0;
 }
 
@@ -918,6 +958,11 @@ int scr_dialogue_exit()
     gmouse_3d_on();
 
     gdDialogWentOff = true;
+
+    // Coop: tells the client to tear down its own real visual dialogue
+    // puppet, mirroring coopnet_notify_dialogue_visual_begin() above.
+    // Same no-op-on-client/no-op-if-disconnected behavior.
+    coopnet_notify_dialogue_visual_end();
 
     return 0;
 }
@@ -1129,6 +1174,15 @@ int gDialogReplyStr(Program* program, int messageListId, const char* text)
 // 0x43E878
 int gDialogGo()
 {
+    // Coop: the client never runs a real dialogue of its own -- it only
+    // watches the host's through the puppet view. A script running in the
+    // client's independent copy of the world (e.g. the rent-a-room bed
+    // script) used to start one anyway and collide with that puppet window,
+    // crashing on a null text buffer (confirmed via a crash dump).
+    if (coopnet_get_role() == CoopRole::Client) {
+        return 0;
+    }
+
     if (dialogBlock.replyMessageListId == -1) {
         return 0;
     }
@@ -1279,6 +1333,30 @@ int gDialogSayMessage()
 // currently-displayed reply/option text to the client whenever it visibly
 // changes (edge-triggered, not every frame, so the client's message log
 // doesn't get spammed with the same lines repeated ~10x/second).
+// Coop: diff snapshot for coopnet_dialogue_sync_tick() below -- hoisted to
+// file scope (was function-local static) so coopnet_dialogue_sync_reset()
+// can clear it between separate conversations. As function-locals these
+// lived for the whole process lifetime: after the first conversation ended,
+// they kept holding its last reply/options, so a second conversation whose
+// very first line matched anything left over (most commonly just still
+// showing lastOptionCount == 0 with an empty lastReplyText, which a lot of
+// short/one-line greetings also start as) was wrongly seen as "no change"
+// and never sent -- confirmed via testing as the cause of a second
+// conversation showing no dialogue mirror window on the client at all.
+static char lastDialogueReplyText[900] = "";
+static char lastDialogueOptionText[DIALOG_OPTION_ENTRIES_CAPACITY][900];
+static int lastDialogueOptionCount = -1;
+
+// Coop: called from gdialog_enter() right alongside coopnet_notify_dialogue_begin()
+// so every new conversation's first synced state is compared against "nothing
+// sent yet" rather than whatever the previous, already-ended conversation
+// happened to leave behind.
+static void coopnet_dialogue_sync_reset()
+{
+    lastDialogueReplyText[0] = '\0';
+    lastDialogueOptionCount = -1;
+}
+
 static void coopnet_dialogue_sync_tick()
 {
     coopnet_poll();
@@ -1287,14 +1365,10 @@ static void coopnet_dialogue_sync_tick()
         return;
     }
 
-    static char lastReplyText[900] = "";
-    static char lastOptionText[DIALOG_OPTION_ENTRIES_CAPACITY][900];
-    static int lastOptionCount = -1;
-
-    bool changed = lastOptionCount != gdNumOptions || strcmp(lastReplyText, dialogBlock.replyText) != 0;
+    bool changed = lastDialogueOptionCount != gdNumOptions || strcmp(lastDialogueReplyText, dialogBlock.replyText) != 0;
     if (!changed) {
         for (int i = 0; i < gdNumOptions; i++) {
-            if (strcmp(lastOptionText[i], dialogBlock.options[i].text) != 0) {
+            if (strcmp(lastDialogueOptionText[i], dialogBlock.options[i].text) != 0) {
                 changed = true;
                 break;
             }
@@ -1305,18 +1379,159 @@ static void coopnet_dialogue_sync_tick()
         return;
     }
 
-    strncpy(lastReplyText, dialogBlock.replyText, sizeof(lastReplyText) - 1);
-    lastReplyText[sizeof(lastReplyText) - 1] = '\0';
-    lastOptionCount = gdNumOptions;
+    strncpy(lastDialogueReplyText, dialogBlock.replyText, sizeof(lastDialogueReplyText) - 1);
+    lastDialogueReplyText[sizeof(lastDialogueReplyText) - 1] = '\0';
+    lastDialogueOptionCount = gdNumOptions;
 
     const char* optionTexts[DIALOG_OPTION_ENTRIES_CAPACITY];
+    int optionListIds[DIALOG_OPTION_ENTRIES_CAPACITY];
+    int optionMsgIds[DIALOG_OPTION_ENTRIES_CAPACITY];
+    int optionReactions[DIALOG_OPTION_ENTRIES_CAPACITY];
     for (int i = 0; i < gdNumOptions; i++) {
-        strncpy(lastOptionText[i], dialogBlock.options[i].text, sizeof(lastOptionText[i]) - 1);
-        lastOptionText[i][sizeof(lastOptionText[i]) - 1] = '\0';
+        strncpy(lastDialogueOptionText[i], dialogBlock.options[i].text, sizeof(lastDialogueOptionText[i]) - 1);
+        lastDialogueOptionText[i][sizeof(lastDialogueOptionText[i]) - 1] = '\0';
         optionTexts[i] = dialogBlock.options[i].text;
+        optionListIds[i] = dialogBlock.options[i].messageListId;
+        optionMsgIds[i] = dialogBlock.options[i].messageId;
+        optionReactions[i] = dialogBlock.options[i].reaction;
     }
 
-    coopnet_notify_dialogue_state(dialogBlock.replyText, optionTexts, gdNumOptions);
+    coopnet_notify_dialogue_state(dialogBlock.replyMessageListId, dialogBlock.replyMessageId, dialogBlock.replyText,
+        optionListIds, optionMsgIds, optionReactions, optionTexts, gdNumOptions);
+}
+
+// Client-side only: puppet functions for the REAL visual dialogue system
+// (background/frame art, animated head portrait, voice audio), driven by
+// network-synced data instead of a locally-running script + the modal
+// gDialogProcess() loop. Reuses the actual host-side functions/globals
+// wholesale (scr_dialogue_init()/scr_dialogue_exit(), gDialogProcessInit()/
+// gDialogProcessUpdate()/gDialogProcessExit(), dialogBlock) rather than
+// re-deriving a parallel rendering path -- same visual result as the
+// host's own screen, including side effects like disabling the client's
+// own mouse/camera/music for the duration (an explicit design choice: the
+// client's screen focuses on the conversation the same way the host's
+// does, rather than staying free-roam behind a small overlay -- see
+// coopnet_notify_dialogue_visual_begin()'s comment in coopnet.h).
+static bool g_coopClientDialogueVisualActive = false;
+
+bool coopnet_client_dialogue_visual_active()
+{
+    return g_coopClientDialogueVisualActive;
+}
+
+void coopnet_client_begin_dialogue_visual(int headFid, int reaction)
+{
+    if (g_coopClientDialogueVisualActive) {
+        coopnet_client_end_dialogue_visual();
+    }
+
+    // scr_dialogue_init() dereferences dialog_target directly (a
+    // camera-scroll convenience, see its own body) -- the client never
+    // has the host's actual NPC object, so its own obj_dude (always
+    // valid, always OBJ_TYPE_CRITTER) stands in as a harmless
+    // placeholder; worst case this just centers the client's camera on
+    // its own character, not a crash risk.
+    dialog_target = obj_dude;
+
+    // gdialog_setup_speech() (triggered indirectly via
+    // coopnet_client_apply_dialogue_visual_state() below, through
+    // scr_get_msg_str_speech()) reads this GLOBAL, not a parameter --
+    // scr_dialogue_init()'s own headFid argument only feeds the fidget
+    // animation, not the voice-audio head-art-name lookup.
+    dialogue_head = headFid;
+
+    dialog_state_fix = 1;
+
+    // scr_dialogue_init() only calls gmouse_disable(0) itself when
+    // gdDialogTurnMouseOff is set, which only ever happens via
+    // dialogue_system_enter()'s own GAME_STATE_5 continuation path -- not
+    // reached from this puppet flow. Disabling explicitly instead,
+    // matching the "suspend the client's input too" design choice;
+    // paired with an explicit gmouse_enable() in
+    // coopnet_client_end_dialogue_visual() below rather than relying on
+    // scr_dialogue_exit()'s own (equally gated) re-enable.
+    gmouse_disable(0);
+
+    scr_dialogue_init(headFid, reaction);
+    gDialogProcessInit();
+
+    g_coopClientDialogueVisualActive = true;
+}
+
+void coopnet_client_apply_dialogue_visual_state(int replyListId, int replyMsgId, const char* replyText,
+    int optionCount, const int* optionListIds, const int* optionMsgIds, const int* optionReactions,
+    const char* const* optionTexts)
+{
+    if (!g_coopClientDialogueVisualActive) {
+        return;
+    }
+
+    dialogBlock.replyMessageListId = replyListId;
+    dialogBlock.replyMessageId = replyMsgId;
+    strncpy(dialogBlock.replyText, replyText != NULL ? replyText : "", sizeof(dialogBlock.replyText) - 1);
+    dialogBlock.replyText[sizeof(dialogBlock.replyText) - 1] = '\0';
+    dialogBlock.offset = 0;
+
+    int count = optionCount;
+    if (count > DIALOG_OPTION_ENTRIES_CAPACITY) {
+        count = DIALOG_OPTION_ENTRIES_CAPACITY;
+    }
+    gdNumOptions = count;
+    for (int i = 0; i < count; i++) {
+        GameDialogOptionEntry* entry = &(dialogBlock.options[i]);
+        entry->messageListId = optionListIds[i];
+        entry->messageId = optionMsgIds[i];
+        entry->reaction = optionReactions[i];
+        entry->btn = -1;
+        strncpy(entry->text, optionTexts[i] != NULL ? optionTexts[i] : "", sizeof(entry->text) - 1);
+        entry->text[sizeof(entry->text) - 1] = '\0';
+    }
+
+    // Reuses the exact same drawing/lookup path the host's own
+    // gDialogProcess() loop calls on every state change -- re-resolves
+    // reply/option text locally when the id is a real message-list entry
+    // (>0 for the reply, >=0 for options -- same convention vanilla's own
+    // GameDialogBlock already uses), which is also what triggers voice
+    // audio as a side effect (scr_get_msg_str_speech() internally calls
+    // gdialog_setup_speech()). Falls back to the text already placed
+    // above when the id is one of the literal-text sentinels (-1/-2/-4).
+    gDialogProcessUpdate();
+}
+
+// Client puppet dialogue: the option buttons report hover (1200+i) / unhover
+// (1300+i) events exactly like on the host, whose gDialogProcess() loop turns
+// them into the highlight. The client has no such loop, so nothing lit up under
+// the mouse and the wrong option got clicked. True if the key was a hover event.
+bool coopnet_client_dialogue_hover(int keyCode)
+{
+    if (!g_coopClientDialogueVisualActive) {
+        return false;
+    }
+    if (keyCode >= 1200 && keyCode <= 1250) {
+        gDialogProcessHighlight(keyCode - 1200);
+        return true;
+    }
+    if (keyCode >= 1300 && keyCode <= 1330) {
+        gDialogProcessUnHighlight(keyCode - 1300);
+        return true;
+    }
+    return false;
+}
+
+void coopnet_client_end_dialogue_visual()
+{
+    if (!g_coopClientDialogueVisualActive) {
+        return;
+    }
+
+    gDialogProcessExit();
+    scr_dialogue_exit();
+
+    dialog_state_fix = 0;
+    dialog_target = NULL;
+    gmouse_enable();
+
+    g_coopClientDialogueVisualActive = false;
 }
 
 static int gDialogProcess()
@@ -1349,6 +1564,11 @@ static int gDialogProcess()
 
         int keyCode = get_input();
 
+        // Coop: while the client drives this conversation the host only
+        // watches -- its own input is dropped and the client's pick is fed in
+        // as the "choose option N" key. See coopnet_dialogue_filter_input().
+        keyCode = coopnet_dialogue_filter_input(keyCode);
+
         convertMouseWheelToArrowKey(&keyCode);
 
         if (keyCode == KEY_CTRL_Q || keyCode == KEY_CTRL_X || keyCode == KEY_F10) {
@@ -1366,7 +1586,28 @@ static int gDialogProcess()
         } else {
             if (dialogue_switch_mode == 3) {
                 dialogue_state = 4;
+
+                // Coop: a client-driven barter is the COMPANION's trade -- its
+                // inventory, not the host character's -- and the client sees
+                // and operates the host's real trade screen (remote screen).
+                Object* coopSavedDude = NULL;
+                if (coopnet_dialogue_driven_by_client() && coopnet_get_companion() != NULL) {
+                    coopSavedDude = obj_dude;
+                    obj_dude = coopnet_get_companion();
+                    // The trade window reads its player from inven_dude, a
+                    // separate variable set earlier -- swapping obj_dude alone
+                    // left it on the HOST's character (confirmed via testing:
+                    // barter opened the host's inventory).
+                    inven_set_dude(obj_dude, obj_dude->pid);
+                }
+                coopnet_remote_begin();
                 barter_inventory(dialogueWindow, dialog_target, peon_table_obj, barterer_table_obj, gdBarterMod);
+                coopnet_remote_end();
+                if (coopSavedDude != NULL) {
+                    obj_dude = coopSavedDude;
+                    inven_set_dude(obj_dude, obj_dude->pid);
+                    coopnet_after_client_barter();
+                }
                 dialogue_barter_cleanup_tables();
 
                 int v5 = dialogue_state;
@@ -1381,7 +1622,9 @@ static int gDialogProcess()
             }
 
             if (dialogue_switch_mode == 6) {
+                coopnet_remote_begin();
                 about_loop();
+                coopnet_remote_end();
             } else if (keyCode == KEY_LOWERCASE_B) {
                 talk_to_pressed_barter(-1, -1);
             } else if (keyCode == KEY_LOWERCASE_A) {
@@ -2947,6 +3190,18 @@ static void dialogue_barter_cleanup_tables()
 // 0x440EC4
 static void talk_to_pressed_barter(int btn, int keyCode)
 {
+    // Coop: the client's puppet dialogue window has these same buttons but no
+    // real dialog_target of its own (it is NULL there) -- pressing one crashed
+    // the client (confirmed via testing). Barter / "tell me about" / review are
+    // not client-driven yet, so they do nothing on the client.
+    if (coopnet_get_role() == CoopRole::Client) {
+        // The button press is a driver command for the host, which runs the
+        // real trade screen (and streams it back) -- see the remote screen in
+        // coopnet.cc.
+        coopnet_on_client_dialogue_command(2);
+        return;
+    }
+
     if (PID_TYPE(dialog_target->pid) != OBJ_TYPE_CRITTER) {
         return;
     }
@@ -2986,6 +3241,12 @@ static void talk_to_pressed_barter(int btn, int keyCode)
 // 0x440FB4
 static void talk_to_pressed_about(int btn, int keyCode)
 {
+    // Coop: see talk_to_pressed_barter()'s comment.
+    if (coopnet_get_role() == CoopRole::Client) {
+        coopnet_on_client_dialogue_command(3);
+        return;
+    }
+
     MessageListItem mesg;
     int reaction;
     int reaction_level;
@@ -3029,6 +3290,11 @@ static void talk_to_pressed_about(int btn, int keyCode)
 // NOTE: Uncollapsed 0x445CA0 with different signature.
 static void talk_to_pressed_review(int btn, int keyCode)
 {
+    // Coop: see talk_to_pressed_barter()'s comment.
+    if (coopnet_get_role() == CoopRole::Client) {
+        return;
+    }
+
     gdialog_review();
 }
 

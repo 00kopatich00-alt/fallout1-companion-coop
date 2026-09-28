@@ -45,6 +45,20 @@ void gdialogSetBarterMod(int modifier);
 int gdActivateBarter(int modifier);
 void barter_end_to_talk_to();
 
+// Client-side only: puppet functions for the real visual dialogue system
+// (background/frame art, animated head portrait, voice audio), driven by
+// network-synced data from the host instead of a local script +
+// gDialogProcess() loop. See coopnet_notify_dialogue_visual_begin()'s
+// comment in coopnet.h for the full picture. Defined in gdialog.cc, which
+// already has direct access to dialogBlock/gReplyWin/gOptionWin/etc.
+bool coopnet_client_dialogue_visual_active();
+bool coopnet_client_dialogue_hover(int keyCode);
+void coopnet_client_begin_dialogue_visual(int headFid, int reaction);
+void coopnet_client_apply_dialogue_visual_state(int replyListId, int replyMsgId, const char* replyText,
+    int optionCount, const int* optionListIds, const int* optionMsgIds, const int* optionReactions,
+    const char* const* optionTexts);
+void coopnet_client_end_dialogue_visual();
+
 } // namespace fallout
 
 #endif /* FALLOUT_GAME_GDIALOG_H_ */

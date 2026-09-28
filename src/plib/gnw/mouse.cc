@@ -11,6 +11,8 @@
 
 namespace fallout {
 
+bool coopnet_remote_host_owns_mouse();
+
 static void mouse_colorize();
 static void mouse_anim();
 static void mouse_clip();
@@ -425,6 +427,13 @@ void mouse_info()
     }
 
     if (mouse_disabled) {
+        return;
+    }
+
+    // While the host mirrors a screen for the coop driver, the driver's
+    // injected mouse owns the pointer: polling the real (idle) mouse here would
+    // overwrite each injected button press with "no buttons" straight away.
+    if (coopnet_remote_host_owns_mouse()) {
         return;
     }
 

@@ -11,6 +11,7 @@
 #include "game/bmpdlog.h"
 #include "game/combat.h"
 #include "game/combatai.h"
+#include "game/coopnet.h"
 #include "game/critter.h"
 #include "game/cycle.h"
 #include "game/display.h"
@@ -1573,6 +1574,14 @@ static int SaveSlot()
     snprintf(gmpath, sizeof(gmpath), "%s\\%s%.2d\\", "SAVEGAME", "SLOT", slot_cursor + 1);
     MapDirErase(gmpath, "BAK");
 
+    // Coop: the client's character (the host's companion object) isn't part
+    // of the game save -- keep its inventory/HP in a file beside it.
+    {
+        char coopPath[80];
+        snprintf(coopPath, sizeof(coopPath), "%s\\%s%.2d\\%s", "SAVEGAME", "SLOT", slot_cursor + 1, "COOP.DAT");
+        coopnet_host_save_profile(coopPath);
+    }
+
     lsgmesg.num = 140;
     if (message_search(&lsgame_msgfl, &lsgmesg)) {
         display_print(lsgmesg.text);
@@ -1650,6 +1659,15 @@ static int LoadSlot(int slot)
     snprintf(str, sizeof(str), "%s\\", "MAPS");
     MapDirErase(str, "BAK");
     proto_dude_update_gender();
+
+    // Coop: read back the client character's saved inventory/HP (applied when
+    // hosting starts, see coopnet_host_load_profile()).
+    {
+        char coopPath[80];
+        snprintf(coopPath, sizeof(coopPath), "%s\\%s%.2d\\%s", "SAVEGAME", "SLOT", slot_cursor + 1, "COOP.DAT");
+        coopnet_host_load_profile(coopPath);
+        coopnet_on_game_loaded();
+    }
 
     // Game Loaded.
     lsgmesg.num = 141;
