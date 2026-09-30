@@ -227,6 +227,8 @@ target_sources(${EXECUTABLE_NAME} PUBLIC
     "src/plib/db/lzss.h"
     "src/plib/gnw/button.cc"
     "src/plib/gnw/button.h"
+    "src/plib/gnw/crash_handler.cc"
+    "src/plib/gnw/crash_handler.h"
     "src/plib/gnw/debug.cc"
     "src/plib/gnw/debug.h"
     "src/plib/gnw/dxinput.cc"
