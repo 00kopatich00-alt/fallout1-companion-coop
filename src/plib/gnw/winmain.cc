@@ -10,6 +10,7 @@
 
 #include "game/coopnet.h"
 #include "game/main.h"
+#include "plib/gnw/crash_handler.h"
 #include "plib/gnw/gnw.h"
 #include "plib/gnw/svga.h"
 
@@ -33,6 +34,11 @@ char GNW95_title[256];
 int main(int argc, char* argv[])
 {
     int rc;
+
+    // Coop: catches a native crash (access violation, etc.) that would
+    // otherwise leave coopnet_debug.log just silently stopping mid-line with
+    // no indication of why -- see crash_handler.h.
+    crash_handler_install();
 
     coopnet_parse_command_line(argc, argv);
 
