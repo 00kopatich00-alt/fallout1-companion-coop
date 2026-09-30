@@ -4568,6 +4568,26 @@ static void coopnet_client_apply_map_transition(const CoopMapTransition& transit
     g_coopClientCombatTurnActive = false;
     coopnet_clear_combat_participants();
 
+    // The client's own local simulation can perfectly well be mid-fight when
+    // this direct transition arrives (its nearby mirrored hostiles run their
+    // own independent AI -- see coopnet_apply_combat_participant()'s
+    // comment). Normally leaving a map through the real exit-grid/
+    // map_leave_map() path tears down combat_list/list_com/list_noncom via
+    // combat_over_from_load() (loadsave.cc's own save-load path does the
+    // same). This bypasses that entirely, same as map_reset_transition_state()'s
+    // comment just below -- so without this, combat_list kept pointing at
+    // this map's critter objects, map_load() below then frees them wholesale
+    // as part of tearing down the old map, and the next local fight to
+    // reference one of those now-dangling slots (combat_add_noncoms()/
+    // combat_end(), reading whatever object memory happens to have been
+    // reused for by then -- confirmed via a crash dump landing in
+    // combatai_want_to_join() on what was by then a wall object) is an
+    // access violation. Tear combat down here, while its objects are still
+    // the valid, about-to-be-freed old map's.
+    if (isInCombat()) {
+        combat_over_from_load();
+    }
+
     // This bypasses map_leave_map()/map_check_state() entirely (it's not a
     // real in-engine exit trigger, just a direct by-name load), so
     // map_data.cc's own file-static map_state is never populated for this
@@ -5729,12 +5749,26 @@ void coopnet_on_game_loaded()
     // reloading, a second death just left the body lying there).
     g_coopCompanionGameOverSent = false;
 
+    // A full Load Game (unlike a map transition) wipes the whole map's
+    // objects via map_load_file()'s own obj_remove_all() -- which, exactly
+    // like coopnet_destroy_companion()'s comment describes for transitions,
+    // silently refuses to touch the companion because of its own
+    // OBJECT_NO_REMOVE flag. Dropping the reference here without destroying
+    // it first (the bug: just `g_coopCompanion = NULL`) left that old
+    // object fully intact and still on the map, then coopnet_find_or_spawn_companion()
+    // below -- unable to find it, since it's also OBJECT_NO_SAVE and so was
+    // never in the save file to "find" -- spawned a fresh one right next to
+    // it. Confirmed via testing: reloading a save N times left N leftover
+    // companion copies standing around. Destroy the old one first, same as
+    // the transition path already does.
     if (g_coopRole == CoopRole::Client) {
+        coopnet_destroy_companion(g_coopCompanion);
         g_coopCompanion = NULL;
         if (g_coopConnState == CoopConnState::Connected) {
             coopnet_send_message(g_coopPeerSocket, COOP_MSG_RESYNC_REQUEST, NULL, 0);
         }
     } else if (g_coopRole == CoopRole::Host) {
+        coopnet_destroy_companion(g_coopCompanion);
         g_coopCompanion = NULL;
         coopnet_host_reset_world_shadow();
         g_coopCompanion = coopnet_find_or_spawn_companion(obj_dude->pid, obj_dude->tile, obj_dude->elevation);
