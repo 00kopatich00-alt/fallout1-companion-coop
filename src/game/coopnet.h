@@ -269,6 +269,13 @@ void coopnet_notify_attack_sfx(Object* owner, const char* soundName, int delay);
 // talk to; the conversation that starts next is driven by the client.
 void coopnet_note_companion_reached_npc();
 
+// Host: the host's own character (not the companion) is the one whose Talk
+// click is opening this conversation -- takes priority over the "whoever's
+// physically closer" guess coopnet_mark_dialogue_client_initiated() makes for
+// NPC-initiated greetings, since that guess can otherwise misfire mid-way
+// through this very click.
+void coopnet_mark_dialogue_host_initiated();
+
 // Same for stealing (client drives the steal screen, host watches).
 bool coopnet_host_run_companion_steal(Object* thief, Object* target);
 

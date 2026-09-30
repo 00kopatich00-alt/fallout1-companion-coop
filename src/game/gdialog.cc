@@ -606,10 +606,12 @@ void gdialog_enter(Object* target, int a2)
     }
 
     if (isInCombat()) {
+        debug_printf("\nCoop-debug: gdialog_enter() refused -- isInCombat() true\n");
         return;
     }
 
     if (target->sid == -1) {
+        debug_printf("\nCoop-debug: gdialog_enter() refused -- target sid == -1 (pid=%d)\n", target->pid);
         return;
     }
 
@@ -649,6 +651,29 @@ void gdialog_enter(Object* target, int a2)
             }
             return;
         }
+    }
+
+    // Coop: gDialogProcess()'s modal dialogue loop calls coopnet_poll() every
+    // tick (see its comment below) so the network stays alive while a
+    // conversation is open -- something vanilla single-player never had to
+    // do, since its dialogue windows are otherwise fully modal with nothing
+    // else running concurrently. If a network-triggered path ever forced a
+    // past conversation to end abnormally (skipping scr_dialogue_exit()'s
+    // normal cleanup), dialogue_state/gdialog_state/dialogue_switch_mode can
+    // be left stuck away from their idle values. Every call to
+    // gdialog_enter() is a brand-new top-level conversation -- vanilla's own
+    // modal UI guarantees dialogue_state is always 0 by the time a new Talk
+    // click can land -- so a nonzero dialogue_state here is unambiguously
+    // stale, not a legitimate in-progress conversation, and left alone it
+    // makes scr_dialogue_init()'s own `dialogue_state == 1` guard
+    // permanently refuse every future conversation with every NPC.
+    // Self-heal by clearing it before this attempt.
+    if (dialogue_state != 0 || gdialog_state == 1 || dialogue_switch_mode != 0) {
+        debug_printf("\nCoop-debug: gdialog_enter() found stale dialogue state (dialogue_state=%d gdialog_state=%d dialogue_switch_mode=%d) -- resetting before starting a fresh conversation\n",
+            dialogue_state, gdialog_state, dialogue_switch_mode);
+        dialogue_state = 0;
+        gdialog_state = 0;
+        dialogue_switch_mode = 0;
     }
 
     gdCenterTile = tile_center_tile;

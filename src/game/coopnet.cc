@@ -791,6 +791,25 @@ static bool g_coopDialogueDrivenByClient = false;
 static int g_coopPendingDialoguePick = -1;
 const uint32_t kCoopDialogueDriverPendingTimeoutMs = 4000;
 
+// Host-side: set the instant the host's own Talk click starts a conversation
+// (talk_to() in actions.cc, a1 == obj_dude) -- i.e. the one case where who's
+// driving is already known for certain, not guessed. DIALOGUE_SYSTEM_ENTER
+// (op_dialogue_system_enter) runs as the *first opcode of every single NPC's
+// talk_p_proc*, including ones opened by this very click -- not just genuine
+// NPC-initiated ambient greetings, which is the only case
+// coopnet_mark_dialogue_client_initiated()'s "whoever's physically closer"
+// guess was actually meant for. Without this, that guess could fire mid-way
+// through the host's own ordinary Talk click (the companion routinely stands
+// closer to whoever the host is talking to than the host does) and wrongly
+// mark the conversation client-driven, which makes DUDE_OBJ resolve to the
+// companion for the NPC's entire script (op_dude_obj, intextra.cc) -- for any
+// NPC whose dialogue logic checks the "player's" reaction/stats/quest items,
+// that silently fails whatever check it was doing and the conversation ends
+// immediately with no dialogue ever shown. Confirmed as the mechanism behind
+// reports of specific NPCs (e.g. Aradesh) ending dialogue instantly for the
+// host despite a normal, un-companion-involved Talk click.
+static bool g_coopDialogueHostInitiated = false;
+
 // Client side: the host says this conversation is ours to drive.
 static bool g_coopClientDrivesDialogue = false;
 
@@ -3371,6 +3390,7 @@ static void coopnet_host_on_client_lost()
 {
     g_coopDialogueDrivenByClient = false;
     g_coopDialogueDriverPending = false;
+    g_coopDialogueHostInitiated = false;
     g_coopPendingDialoguePick = -1;
     g_coopRemoteHostActive = false;
     g_coopRemoteForceDrive = false;
@@ -6312,6 +6332,14 @@ void coopnet_note_companion_reached_npc()
     g_coopDialogueDriverPendingMs = coopnet_now_ms();
 }
 
+// Host-side: called from talk_to() (actions.cc) when the host's own
+// character (obj_dude, not the companion) is the one whose Talk click is
+// opening this conversation. See g_coopDialogueHostInitiated's comment.
+void coopnet_mark_dialogue_host_initiated()
+{
+    g_coopDialogueHostInitiated = true;
+}
+
 // Host-side: an NPC's own script is starting a conversation (its
 // dialogue_system_enter opcode) -- e.g. someone who talks to whoever walks up
 // to them. If the client's companion is the one that's nearer to that NPC,
@@ -6322,6 +6350,13 @@ void coopnet_mark_dialogue_client_initiated(Object* npc)
 {
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected
         || g_coopCompanion == NULL || npc == NULL) {
+        return;
+    }
+
+    // The host's own Talk click already tells us for certain who's driving --
+    // never let the proximity guess below override that. See
+    // g_coopDialogueHostInitiated's comment.
+    if (g_coopDialogueHostInitiated) {
         return;
     }
 
@@ -6415,6 +6450,7 @@ void coopnet_notify_dialogue_begin()
     // Promote a queued client request to "this conversation is client-driven".
     g_coopDialogueDrivenByClient = coopnet_dialogue_driven_by_client();
     g_coopDialogueDriverPending = false;
+    g_coopDialogueHostInitiated = false;
     g_coopPendingDialoguePick = -1;
 
     bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_DIALOGUE_BEGIN, NULL, 0);
@@ -6428,6 +6464,7 @@ void coopnet_notify_dialogue_end()
 {
     g_coopDialogueDrivenByClient = false;
     g_coopDialogueDriverPending = false;
+    g_coopDialogueHostInitiated = false;
     g_coopPendingDialoguePick = -1;
 
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected) {

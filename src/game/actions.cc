@@ -1920,6 +1920,10 @@ static int talk_to(Object* a1, Object* a2)
     // conversation (the host watches).
     if (a1 != obj_dude && a1 == coopnet_get_companion()) {
         coopnet_note_companion_reached_npc();
+    } else if (a1 == obj_dude) {
+        // Coop: the host's own Talk click -- see g_coopDialogueHostInitiated's
+        // comment in coopnet.cc for why this has to be marked explicitly.
+        coopnet_mark_dialogue_host_initiated();
     }
     scripts_request_dialog(a2);
     return 0;
