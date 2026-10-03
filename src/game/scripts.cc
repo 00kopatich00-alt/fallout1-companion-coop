@@ -1069,6 +1069,13 @@ int scripts_request_elevator(int elevator)
     return 0;
 }
 
+// Coop: true while an elevator request raised by a script is still waiting to
+// be turned into the floor-select screen.
+bool scripts_elevator_requested()
+{
+    return (scriptState.requests & SCRIPT_REQUEST_ELEVATOR) != 0;
+}
+
 // 0x492844
 int scripts_request_explosion(int tile, int elevation, int minDamage, int maxDamage)
 {
