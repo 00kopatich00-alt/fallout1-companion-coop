@@ -1252,9 +1252,14 @@ Object* combat_ai(Object* critter, Object* target)
 // 0x425D20
 bool combatai_want_to_join(Object* a1)
 {
-    // TEMP DEBUG (companion-only-fight investigation, remove once resolved):
-    debug_printf("\nCoop-debug: combatai_want_to_join called for pid=%d tile=%d elevation=%d (obj_dude elevation=%d)\n",
-        a1->pid, a1->tile, a1->elevation, obj_dude->elevation);
+    // Coop: a stale combat_list slot (an object freed by a map load while the
+    // list still pointed at it) can hand this a non-critter -- everything
+    // below reads critter-only fields, which is how a client crashed on a wall
+    // object. Refuse it and say so instead of crashing the game.
+    if (a1 == NULL || FID_TYPE(a1->fid) != OBJ_TYPE_CRITTER) {
+        coopnet_report_glitch("combatai_want_to_join was handed a non-critter (pid=%d) - ignored", a1 != NULL ? a1->pid : -1);
+        return false;
+    }
 
     process_bk();
 
@@ -1293,8 +1298,6 @@ bool combatai_want_to_join(Object* a1)
     }
 
     Object* dangerSource = ai_danger_source(a1);
-    debug_printf("\nCoop-debug: combatai_want_to_join pid=%d ai_danger_source=%s\n",
-        a1->pid, dangerSource == NULL ? "NULL" : (dangerSource == obj_dude ? "obj_dude" : (dangerSource == coopnet_get_companion() ? "companion" : "other")));
     if (dangerSource == NULL) {
         return false;
     }

@@ -1183,6 +1183,18 @@ int obj_use(Object* a1, Object* a2)
         // companion isn't obj_dude, so those checks silently failed and the
         // script did nothing at all.
         Object* scriptUser = (a1 != obj_dude && a1 == coopnet_get_companion()) ? obj_dude : a1;
+
+        // Coop: mark that the client's companion is the one using this object
+        // RIGHT NOW, at the moment of use -- not when its walk to the object
+        // began. Whatever screen the script opens next (an elevator's floor
+        // selection is the case) is then driven by the client. It used to be
+        // marked at the start of the walk and honoured for only a few seconds,
+        // which a walk across a room easily outlasts: the elevator screen then
+        // opened view-only for the client and the host had to pick the floor.
+        if (scriptUser != a1) {
+            coopnet_note_companion_used_object();
+        }
+
         scr_set_objs(sid, scriptUser, a2);
         exec_script_proc(sid, SCRIPT_PROC_USE);
 

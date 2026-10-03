@@ -47,6 +47,49 @@ bool coopnet_start_client(const char* ip, int port);
 // Tears down any active session (socket(s) closed, role reset to None).
 void coopnet_shutdown();
 
+// The F9 co-op screen: host or join (typed IP), a live connection status log
+// for both sides (who connected, why an attempt failed), and a "Glitches"
+// page listing everything the sync code has noticed going wrong, with a Save
+// Report button that writes coop_report.txt next to the exe for bug reports.
+// Blocks (its own input loop) until closed.
+void coopnet_open_menu();
+
+// Main-menu co-op entry (F9 on the main menu): pick one of your saved co-op
+// characters or create a new one, type the host's address. Returns true when
+// the player wants to go in; false to return to the main menu. Nothing about a
+// single-player game is started by this.
+bool coopnet_main_menu_join();
+
+// Call right after the game world has been set up for that join (the same
+// point New Game would start playing): starts connecting and shows progress.
+void coopnet_main_menu_join_begin();
+
+// Ends whatever session/retry the player started (back at the main menu).
+void coopnet_end_session();
+
+// Host: the host's party just earned experience (called from
+// stat_pc_add_experience() with the raw amount). The client gets the same
+// gain and levels up on its own PC. No-op unless hosting with a client.
+void coopnet_host_notify_xp(int xp);
+
+// Client: the character screen was just closed -- skill points, perks or traits
+// may have changed, so tell the host and update the character file.
+void coopnet_on_character_screen_closed();
+
+// Called at the very start of game_reset() (every save load / new game): the
+// companion has to be removed BEFORE the engine frees all prototypes, because
+// it would otherwise survive as a critter with no prototype and crash the
+// first time anything reads its stats.
+void coopnet_on_game_reset();
+
+// The display name of the client's character ("Companion" until the client's
+// own character name is known).
+const char* coopnet_get_companion_name();
+
+// Records something that went wrong in the sync code (printf-style) on the
+// co-op menu's Glitches page and in the report, as well as the debug log.
+void coopnet_report_glitch(const char* fmt, ...);
+
 // Must be called exactly once per main-loop tick (see main.cc). Drives the
 // network state machine: accepts/connects, drains incoming messages and
 // applies them, sends periodic position broadcasts (host) or the host-side
@@ -312,7 +355,11 @@ void coopnet_capture_display_print(const char* text);
 // attacker is the companion or obj_dude. See coopnet_notify_attack_anim()'s
 // own comment (coopnet.cc) for why this call site can't miss the way the
 // first combat-text attempt did.
-void coopnet_notify_attack_anim(Object* attacker, int anim);
+// `defender` is only used to tell the client which way the attacker faces
+// while it fires (it turns to the target as part of the attack; the client has
+// to be facing that way BEFORE the animation starts, because changing facing
+// in the middle of one restarts it -- visible as skipped frames).
+void coopnet_notify_attack_anim(Object* attacker, int anim, Object* defender);
 
 // Host-side only. Call from show_damage_to_object()'s own top (actions.cc)
 // with its exact same parameters -- mirrors that one real damage-reaction
@@ -341,7 +388,13 @@ void coopnet_notify_scenery_state(Object* scenery, bool isOpen);
 // register_object_run_to_tile() (anim.cc) once the move is accepted, so
 // the client can run the whole path in one animation instead of chasing
 // position snapshots. No-op unless obj is the companion or obj_dude.
-void coopnet_notify_move(Object* obj, int tile, int elevation, bool run);
+// `actionPoints` is the step limit the move was registered with (-1 = none).
+void coopnet_notify_move(Object* obj, int tile, int elevation, bool run, int actionPoints);
+
+// Same for register_object_move_to_object()/register_object_run_to_object():
+// a move toward another object, which ends adjacent to it. Before this existed
+// an enemy closing in on its target was never mirrored at all.
+void coopnet_notify_move_to_object(Object* obj, Object* destination, bool run, int actionPoints);
 
 // Client-side only. Call when a pipboy rest finishes (pipboy.cc's
 // TimedRest()): sends the client's new game time to the host.

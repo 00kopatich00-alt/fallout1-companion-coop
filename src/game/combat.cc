@@ -1938,7 +1938,16 @@ void combat_give_exps(int exp_points)
     }
 
     snprintf(text, sizeof(text), format.text, prefix.text, exp_points);
+
+    // Coop: the client's screen shows the same experience line the host's does.
+    bool coopCaptureXpText = coopnet_get_role() == CoopRole::Host && coopnet_is_connected();
+    if (coopCaptureXpText) {
+        coopnet_begin_capture_combat_text();
+    }
     display_print(text);
+    if (coopCaptureXpText) {
+        coopnet_end_capture_combat_text();
+    }
 }
 
 // 0x4201A0
@@ -4192,7 +4201,9 @@ void combat_anim_finished()
             // the client's log empty during ordinary attacks. Same wrap as
             // those two sites -- see coopnet_begin_capture_combat_text()'s
             // comment.
-            bool coopCaptureCombatText = main_ctd.attacker == coopnet_get_companion() || main_ctd.defender == coopnet_get_companion();
+            // Everyone's combat text goes to the client, not just lines about the
+            // companion: both screens' message logs should tell the same fight.
+            bool coopCaptureCombatText = coopnet_get_role() == CoopRole::Host && coopnet_is_connected();
             if (coopCaptureCombatText) {
                 coopnet_begin_capture_combat_text();
             }

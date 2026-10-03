@@ -6,6 +6,7 @@
 #include <algorithm>
 
 #include "game/combat.h"
+#include "game/coopnet.h"
 #include "game/critter.h"
 #include "game/display.h"
 #include "game/game.h"
@@ -574,6 +575,10 @@ int stat_result(Object* critter, int stat, int modifier, int* howMuch)
 // 0x49CC3C
 int stat_pc_add_experience(int xp)
 {
+    // Coop: the host's party earned this -- the connected client gets the same
+    // raw gain (before the host's own perks adjust it) and applies its own.
+    coopnet_host_notify_xp(xp);
+
     xp += perk_level(PERK_SWIFT_LEARNER) * 5 * xp / 100;
     xp += stat_pc_get(PC_STAT_EXPERIENCE);
 

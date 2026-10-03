@@ -669,7 +669,7 @@ void gdialog_enter(Object* target, int a2)
     // permanently refuse every future conversation with every NPC.
     // Self-heal by clearing it before this attempt.
     if (dialogue_state != 0 || gdialog_state == 1 || dialogue_switch_mode != 0) {
-        debug_printf("\nCoop-debug: gdialog_enter() found stale dialogue state (dialogue_state=%d gdialog_state=%d dialogue_switch_mode=%d) -- resetting before starting a fresh conversation\n",
+        coopnet_report_glitch("Recovered stale dialogue state before a conversation (dialogue_state=%d gdialog_state=%d switch_mode=%d)",
             dialogue_state, gdialog_state, dialogue_switch_mode);
         dialogue_state = 0;
         gdialog_state = 0;
@@ -711,7 +711,9 @@ void gdialog_enter(Object* target, int a2)
     }
 
     if (script->scriptOverrides || dialogue_state != 4) {
-        debug_printf("\nCoop: conversation with pid=%d never opened (scriptOverrides=%d dialogue_state=%d drivenByClient=%d)\n",
+        // Not a glitch: plenty of NPCs and signs answer a Talk click with just a
+        // floating line (or nothing) instead of opening a dialogue. Debug log only.
+        debug_printf("\nCoop: conversation with NPC pid=%d never opened (scriptOverrides=%d dialogue_state=%d clientDriven=%d)\n",
             target->pid, script->scriptOverrides ? 1 : 0, dialogue_state, coopnet_dialogue_driven_by_client() ? 1 : 0);
         dialogue_just_started = 0;
         map_enable_bk_processes();

@@ -2429,25 +2429,13 @@ bool scr_chk_spatials_in(Object* object, int tile, int elevation)
         return false;
     }
 
-    // Coop: two other fixes were already tried at the actual door
-    // (obj_use_door()'s dude_obj substitution, then a map-scoped refusal
-    // there) and confirmed via user testing to NOT stop the companion from
-    // passing the Vault 13 exit -- meaning the trigger almost certainly isn't
-    // a door/USE interaction at all, it's this: a plain "something is
-    // standing on this tile" script with no actor check of its own (vanilla
-    // never needed one -- only one character could ever be on a tile). This
-    // reinstates blocking it for the companion on V13ENT specifically (tried
-    // and reverted once already, out of concern it might also silence the
-    // vault's own elevator on the same map) -- logged below either way so the
-    // NEXT test tells us, instead of guessing again, whether the elevator's
-    // own trigger is one of the scripts caught by this on that map.
-    // Coop: was checking "V13ENT" -- confirmed WRONG via a fresh debug log
-    // (this exact function's own new logging showed "map=VAULT13.SAV" for
-    // every trigger the companion fired), which is why blocking it never
-    // actually took effect despite the block existing. See
-    // kNoClientExitMaps's comment in coopnet.cc for the full story.
-    bool coopCompanionSpatialBlock = coopnet_get_role() == CoopRole::Host && object == coopnet_get_companion()
-        && (strncmp(map_data.name, "VAULT13", 7) == 0 || strncmp(map_data.name, "V13ENT", 6) == 0);
+    // Coop: the client's companion triggers spatial scripts exactly like any
+    // other character -- including on the Vault 13 maps. A block that refused
+    // them there (added to stop the companion walking out of the vault door)
+    // also silenced every other trigger on those maps, i.e. the vault's own
+    // transitions, and has been removed. The companion's firings are still
+    // logged below.
+    const bool coopCompanionSpatialBlock = false;
 
     if (!scr_spatials_enabled()) {
         return false;

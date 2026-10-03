@@ -206,6 +206,18 @@ int main_menu_create()
         }
     }
 
+    // Coop: a small hint under the button panel for the co-op entry.
+    text_font(103);
+    {
+        const char* coopHint = "F9 - CO-OP";
+        int coopLen = text_width(coopHint);
+        text_to_buf(main_window_buf + MAIN_MENU_WINDOW_WIDTH * 278 + 520 - (coopLen / 2),
+            coopHint,
+            MAIN_MENU_WINDOW_WIDTH - (520 - (coopLen / 2)) - 1,
+            MAIN_MENU_WINDOW_WIDTH,
+            colorTable[21091]);
+    }
+
     text_font(oldFont);
 
     main_menu_created = true;
@@ -356,6 +368,11 @@ int main_menu_loop()
                 IncGamma();
             } else if (keyCode == KEY_MINUS || keyCode == KEY_UNDERSCORE) {
                 DecGamma();
+            } else if (keyCode == KEY_F9) {
+                // NOTE: Uninline.
+                main_menu_play_sound("nmselec1");
+                rc = MAIN_MENU_COOP;
+                continue;
             } else if (keyCode == KEY_UPPERCASE_D || keyCode == KEY_LOWERCASE_D) {
                 rc = MAIN_MENU_SCREENSAVER;
                 continue;

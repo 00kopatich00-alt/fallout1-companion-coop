@@ -622,6 +622,9 @@ int register_object_move_to_object(Object* owner, Object* destination, int actio
 
     curr_anim_counter++;
 
+    // Coop: see coopnet_notify_move_to_object()'s comment.
+    coopnet_notify_move_to_object(owner, destination, false, actionPoints);
+
     return register_object_turn_towards(owner, destination->tile);
 }
 
@@ -662,6 +665,11 @@ int register_object_run_to_object(Object* owner, Object* destination, int action
     }
 
     curr_anim_counter++;
+
+    // Coop: see coopnet_notify_move_to_object()'s comment. `anim` was just
+    // resolved to walk or run above (crippled legs / sneaking downgrade a run).
+    coopnet_notify_move_to_object(owner, destination, animationDescription->anim == ANIM_RUNNING, actionPoints);
+
     return register_object_turn_towards(owner, destination->tile);
 }
 
@@ -697,7 +705,7 @@ int register_object_move_to_tile(Object* owner, int tile, int elevation, int act
     curr_anim_counter++;
 
     // Coop: see coopnet_notify_move()'s comment.
-    coopnet_notify_move(owner, tile, elevation, false);
+    coopnet_notify_move(owner, tile, elevation, false, actionPoints);
 
     return 0;
 }
@@ -743,7 +751,7 @@ int register_object_run_to_tile(Object* owner, int tile, int elevation, int acti
 
     // Coop: see coopnet_notify_move()'s comment. `anim` was just resolved
     // to walk or run above (crippled legs / sneaking downgrade a run).
-    coopnet_notify_move(owner, tile, elevation, animationDescription->anim == ANIM_RUNNING);
+    coopnet_notify_move(owner, tile, elevation, animationDescription->anim == ANIM_RUNNING, actionPoints);
 
     return 0;
 }
@@ -3377,7 +3385,12 @@ unsigned int compute_tpf(Object* object, int fid)
         fps = 10;
     }
 
-    if (isInCombat()) {
+    // Coop: a client never runs combat() itself (the host runs the fight), so its
+    // own isInCombat() is always false -- and every combat walk then played at
+    // the slow base rate while the host's was sped up by the combat speed
+    // setting. That made the client's whole fight look slow, and its replayed
+    // movement fall behind the host's. A synced fight counts as combat here.
+    if (isInCombat() || coopnet_is_client_in_synced_combat()) {
         if (FID_ANIM_TYPE(fid) == ANIM_WALK) {
             int playerSpeedup = 0;
             config_get_value(&game_config, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_PLAYER_SPEEDUP_KEY, &playerSpeedup);

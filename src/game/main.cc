@@ -150,6 +150,35 @@ int gnw_main(int argc, char** argv)
                 main_menu_create();
 
                 break;
+            case MAIN_MENU_COOP:
+                // Coop: join a friend's game with a saved/new character,
+                // straight from the main menu. The world that gets loaded is
+                // only a stand-in until the host's own map arrives.
+                main_menu_hide(true);
+                main_menu_destroy();
+                if (coopnet_main_menu_join()) {
+                    roll_set_seed(-1);
+                    main_load_new(mainMap);
+                    coopnet_main_menu_join_begin();
+                    main_game_loop();
+                    palette_fade_to(white_palette);
+                    coopnet_end_session();
+
+                    // NOTE: Uninline.
+                    main_unload_new();
+
+                    // NOTE: Uninline.
+                    main_reset_system();
+
+                    if (main_show_death_scene != 0) {
+                        main_death_scene();
+                        main_show_death_scene = 0;
+                    }
+                }
+
+                main_menu_create();
+
+                break;
             case MAIN_MENU_LOAD_GAME:
                 if (1) {
                     int win = win_add(0, 0, screenGetWidth(), screenGetHeight(), colorTable[0], WINDOW_MODAL | WINDOW_MOVE_ON_TOP);

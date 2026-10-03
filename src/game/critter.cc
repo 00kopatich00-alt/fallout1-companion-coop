@@ -16,6 +16,7 @@
 #include "game/message.h"
 #include "game/object.h"
 #include "game/party.h"
+#include "game/perk.h"
 #include "game/proto.h"
 #include "game/queue.h"
 #include "game/reaction.h"
@@ -187,12 +188,9 @@ char* critter_name(Object* critter)
 
     if (critter == coopnet_get_companion()) {
         // The companion has no script (see coopnet.h), so it would otherwise
-        // fall through below to proto_name(critter->pid) -- and since the
-        // companion deliberately reuses obj_dude's own pid as its spawn
-        // template, that would show the same generic proto name as the
-        // player's own character instead of a distinct one.
-        static char companionName[] = "Companion";
-        return companionName;
+        // fall through below to proto_name(critter->pid), which knows nothing
+        // about it. Show the client's own character name once it's known.
+        return const_cast<char*>(coopnet_get_companion_name());
     }
 
     if (critter->field_80 == -1) {
@@ -1025,6 +1023,113 @@ int pc_save_data(const char* path)
     }
 
     db_fclose(stream);
+    return 0;
+}
+
+// Coop: a co-op character file. pc_save_data() above is the character
+// CREATION template (stats, name, tags, traits) -- it has no level, XP,
+// unspent skill points or perks, so a character that had played could not be
+// kept in one. This adds those, behind a small header so a list of saved
+// characters can show a name and level without loading each one.
+const int kCoopCharMagic = 0x52484343; // "CCHR"
+const int kCoopCharVersion = 1;
+
+int pc_coop_save_data(const char* path)
+{
+    DB_FILE* stream = db_fopen(path, "wb");
+    if (stream == NULL) {
+        return -1;
+    }
+
+    Proto* proto;
+    proto_ptr(obj_dude->pid, &proto);
+
+    char name[DUDE_NAME_MAX_LENGTH];
+    memset(name, 0, sizeof(name));
+    strncpy(name, pc_name, DUDE_NAME_MAX_LENGTH - 1);
+
+    if (db_fwriteInt(stream, kCoopCharMagic) == -1
+        || db_fwriteInt(stream, kCoopCharVersion) == -1
+        || db_fwrite(name, DUDE_NAME_MAX_LENGTH, 1, stream) != 1
+        || db_fwriteInt(stream, stat_pc_get(PC_STAT_LEVEL)) == -1
+        || critter_write_data(stream, &(proto->critter.data)) == -1
+        || db_fwrite(pc_name, DUDE_NAME_MAX_LENGTH, 1, stream) != 1
+        || skill_save(stream) == -1
+        || trait_save(stream) == -1
+        || stat_save(stream) == -1
+        || perk_save(stream) == -1
+        || db_fwriteInt(stream, character_points) == -1) {
+        db_fclose(stream);
+        return -1;
+    }
+
+    db_fclose(stream);
+    return 0;
+}
+
+int pc_coop_peek_data(const char* path, char* nameOut, int nameOutSize, int* levelOut)
+{
+    DB_FILE* stream = db_fopen(path, "rb");
+    if (stream == NULL) {
+        return -1;
+    }
+
+    int magic = 0;
+    int version = 0;
+    char name[DUDE_NAME_MAX_LENGTH];
+    int level = 0;
+    if (db_freadInt(stream, &magic) == -1 || magic != kCoopCharMagic
+        || db_freadInt(stream, &version) == -1 || version != kCoopCharVersion
+        || db_fread(name, DUDE_NAME_MAX_LENGTH, 1, stream) != 1
+        || db_freadInt(stream, &level) == -1) {
+        db_fclose(stream);
+        return -1;
+    }
+
+    db_fclose(stream);
+
+    name[DUDE_NAME_MAX_LENGTH - 1] = '\0';
+    strncpy(nameOut, name, nameOutSize - 1);
+    nameOut[nameOutSize - 1] = '\0';
+    *levelOut = level;
+    return 0;
+}
+
+int pc_coop_load_data(const char* path)
+{
+    DB_FILE* stream = db_fopen(path, "rb");
+    if (stream == NULL) {
+        return -1;
+    }
+
+    Proto* proto;
+    proto_ptr(obj_dude->pid, &proto);
+
+    int magic = 0;
+    int version = 0;
+    char headerName[DUDE_NAME_MAX_LENGTH];
+    int headerLevel = 0;
+    if (db_freadInt(stream, &magic) == -1 || magic != kCoopCharMagic
+        || db_freadInt(stream, &version) == -1 || version != kCoopCharVersion
+        || db_fread(headerName, DUDE_NAME_MAX_LENGTH, 1, stream) != 1
+        || db_freadInt(stream, &headerLevel) == -1
+        || critter_read_data(stream, &(proto->critter.data)) == -1
+        || db_fread(pc_name, DUDE_NAME_MAX_LENGTH, 1, stream) != 1
+        || skill_load(stream) == -1
+        || trait_load(stream) == -1
+        || stat_load(stream) == -1
+        || perk_load(stream) == -1
+        || db_freadInt(stream, &character_points) == -1) {
+        db_fclose(stream);
+        return -1;
+    }
+
+    db_fclose(stream);
+
+    proto->critter.data.baseStats[STAT_DAMAGE_RESISTANCE_EMP] = 100;
+    proto->critter.data.bodyType = 0;
+    proto->critter.data.experience = 0;
+    proto->critter.data.killType = 0;
     return 0;
 }
 
