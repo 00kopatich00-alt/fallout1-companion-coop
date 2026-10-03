@@ -245,6 +245,30 @@ int skill_level(Object* critter, int skill)
     return value;
 }
 
+int skill_points_for_level(Object* critter, int skill, int level)
+{
+    if (skill < 0 || skill >= SKILL_COUNT) {
+        return 0;
+    }
+
+    SkillDescription* skill_description = &(skill_data[skill]);
+
+    int bonus;
+    if (skill_description->stat2 != -1) {
+        bonus = (stat_level(critter, skill_description->stat1) + stat_level(critter, skill_description->stat2)) * skill_description->stat_modifier / 2;
+    } else {
+        bonus = stat_level(critter, skill_description->stat1) * skill_description->stat_modifier;
+    }
+
+    int remaining = level - skill_description->default_value - bonus;
+    if (remaining <= 0) {
+        return 0;
+    }
+
+    int perPoint = skill_description->points_modifier > 0 ? skill_description->points_modifier : 1;
+    return (remaining + perPoint / 2) / perPoint;
+}
+
 // 0x49847C
 int skill_base(int skill)
 {

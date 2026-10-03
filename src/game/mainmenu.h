@@ -14,6 +14,9 @@ typedef enum MainMenuOption {
     MAIN_MENU_EXIT,
     MAIN_MENU_SELFRUN,
     MAIN_MENU_OPTIONS,
+    // Coop: join a friend's game straight from the main menu with a saved or
+    // freshly created character -- no single-player world involved.
+    MAIN_MENU_COOP,
 } MainMenuOption;
 
 extern bool in_main_menu;

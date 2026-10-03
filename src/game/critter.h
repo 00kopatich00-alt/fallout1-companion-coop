@@ -92,6 +92,11 @@ int pc_load_data(const char* path);
 int critter_read_data(DB_FILE* stream, CritterProtoData* critter_data);
 int critter_save_data(CritterProtoData* critter_data, const char* path);
 int pc_save_data(const char* path);
+// Coop character files: the whole character, progress (level, XP, perks) included.
+int pc_coop_save_data(const char* path);
+int pc_coop_load_data(const char* path);
+// Just the header: name and level, for listing saved characters.
+int pc_coop_peek_data(const char* path, char* nameOut, int nameOutSize, int* levelOut);
 int critter_write_data(DB_FILE* stream, CritterProtoData* critter_data);
 void pc_flag_off(int pc_flag);
 void pc_flag_on(int pc_flag);

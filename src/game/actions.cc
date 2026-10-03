@@ -568,7 +568,7 @@ int action_attack(Attack* attack)
     // mirror the attacker's swing/point/fire animation to the client. No-op
     // unless the attacker is the companion or obj_dude -- see
     // coopnet_notify_attack_anim()'s comment.
-    coopnet_notify_attack_anim(attack->attacker, anim);
+    coopnet_notify_attack_anim(attack->attacker, anim, attack->defender);
 
     coopnet_begin_attack_sfx(attack->attacker);
     int rc;
@@ -1762,7 +1762,9 @@ static int report_explosion(Attack* attack, Object* a2)
     // hit, damage amount, critical, death -- whatever it decides to print)
     // to the client, verbatim, whenever the companion is involved. See
     // coopnet_begin_capture_combat_text()'s comment.
-    bool coopCaptureCombatText = attack->attacker == coopnet_get_companion() || attack->defender == coopnet_get_companion();
+    // Everyone's combat text goes to the client, not just lines about the
+    // companion: both screens' message logs should tell the same fight.
+    bool coopCaptureCombatText = coopnet_get_role() == CoopRole::Host && coopnet_is_connected();
     if (coopCaptureCombatText) {
         coopnet_begin_capture_combat_text();
     }
@@ -2003,7 +2005,9 @@ static int report_dmg(Attack* attack, Object* a2)
 {
     // Coop: see the identical wrap's comment on the other combat_display()
     // call site above.
-    bool coopCaptureCombatText = attack->attacker == coopnet_get_companion() || attack->defender == coopnet_get_companion();
+    // Everyone's combat text goes to the client, not just lines about the
+    // companion: both screens' message logs should tell the same fight.
+    bool coopCaptureCombatText = coopnet_get_role() == CoopRole::Host && coopnet_is_connected();
     if (coopCaptureCombatText) {
         coopnet_begin_capture_combat_text();
     }

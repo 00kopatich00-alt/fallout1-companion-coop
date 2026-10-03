@@ -23,6 +23,10 @@ void skill_get_tags(int* skills, int count);
 int skill_level(Object* critter, int skill);
 int skill_base(int skill);
 int skill_points(Object* critter, int skill);
+// Coop: the number of raw skill points that makes skill_level() of a NON-player
+// critter come out at `level` -- the inverse of skill_level()'s formula, used
+// to give the client's companion the skill levels its own player has.
+int skill_points_for_level(Object* critter, int skill, int level);
 int skill_inc_point(Object* critter, int skill);
 int skill_dec_point(Object* critter, int skill);
 int skill_result(Object* critter, int skill, int a3, int* a4);

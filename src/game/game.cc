@@ -352,6 +352,13 @@ int game_init(const char* windowTitle, bool isMapper, int font, int flags, int a
 // 0x43B5A8
 void game_reset()
 {
+    // Coop: proto_reset() below frees every prototype, and the companion
+    // survives the object wipe (it's flagged no-remove) -- left alive it would
+    // be a critter whose prototype no longer exists, and the first stat lookup
+    // on it crashes (confirmed by a crash dump: a client loading its own save
+    // while connected). Remove it now, while its prototype is still valid.
+    coopnet_on_game_reset();
+
     tile_disable_refresh();
     palette_reset();
     roll_reset();
@@ -504,10 +511,6 @@ int game_handle_input(int eventCode, bool isInCombatMode)
         return 0;
     }
 
-    if (eventCode != -1 && eventCode != -2) {
-        debug_printf("\nCoop debug: game_handle_input eventCode=%d\n", eventCode);
-    }
-
     switch (eventCode) {
     case -20:
         if (intface_is_enabled()) {
@@ -545,33 +548,11 @@ int game_handle_input(int eventCode, bool isInCombatMode)
         gsound_play_sfx_file("ib1p1xx1");
         game_quit_with_confirm();
         break;
-    case KEY_F9: {
-        // Coop debug entry point (milestone 1): role is decided by the
-        // "--coop-name=HOST"/"--coop-name=CLIENT" launch argument (the same
-        // one used for the window title), rather than a typed prompt —
-        // win_get_str's modal dialog does not render reliably when invoked
-        // from here, so this avoids depending on it for now. A real UI is
-        // future work.
-        const char* label = coopnet_get_instance_label();
-        debug_printf("\nCoop: F9 pressed (label=\"%s\")\n", label);
-        if (strcmp(label, "HOST") == 0) {
-            if (coopnet_start_host(kCoopDefaultPort)) {
-                debug_printf("\nCoop: hosting on port %d\n", kCoopDefaultPort);
-            } else {
-                debug_printf("\nCoop: failed to start host\n");
-            }
-        } else if (strcmp(label, "CLIENT") == 0) {
-            const char* ip = coopnet_get_connect_target();
-            if (coopnet_start_client(ip, kCoopDefaultPort)) {
-                debug_printf("\nCoop: connecting to %s...\n", ip);
-            } else {
-                debug_printf("\nCoop: failed to start client\n");
-            }
-        } else {
-            debug_printf("\nCoop: no --coop-name=HOST/CLIENT set, ignoring F9\n");
-        }
+    case KEY_F9:
+        // The co-op screen: host/join, live connection status, glitch log.
+        debug_printf("\nCoop: F9 pressed (label=\"%s\")\n", coopnet_get_instance_label());
+        coopnet_open_menu();
         break;
-    }
     case KEY_RETURN:
         // Coop client's combat "end turn" -- mirrors obj_dude's own
         // KEY_RETURN -> combat_end() handling inside combat_input(), which
@@ -645,6 +626,8 @@ int game_handle_input(int eventCode, bool isInCombatMode)
             gsound_play_sfx_file("ib1p1xx1");
             bool isoWasEnabled = map_disable_bk_processes();
             editor_design(false);
+            // Coop: a client's skill points, perks and traits may have changed.
+            coopnet_on_character_screen_closed();
             if (isoWasEnabled) {
                 map_enable_bk_processes();
             }

@@ -4,18 +4,18 @@ This is a two-player companion coop mod built on top of [fallout1-ce](https://gi
 
 It's a peer-host design: the host runs the one real, authoritative simulation of the world; the client mirrors it and drives its own companion character. Whoever opens a modal screen first (a conversation, barter, looting, an elevator, the world map) drives it while the other player watches, the same pattern the [Fallout 2 coop project](https://github.com/Cahb/fallout2-ce-coop) uses.
 
-**Status: early and still rough around the edges.** Most of a normal playthrough works — walking, fighting, looting, trading, dialogue, travel, saving — but this is a solo hobby project reverse-engineering undocumented engine internals, not a polished release. Known gaps and open issues:
-- No dedicated UI for hosting/joining yet — it's driven by command-line flags and the F9 key (see below).
-- The client has no character of its own yet (no separate stats/skills/level); it plays as a copy of the host's character. Its inventory, equipment and HP are saved alongside the host's save file, and auto-saved periodically as a safety net against crashes/disconnects, but XP/skill progression isn't tracked separately.
-- No in-game indicator of connection quality; a badly congested connection can still stall the host.
-- Tested on a LAN/localhost between two machines on Windows; not tested over the open internet, and the macOS build is untested.
-- Some enemy positioning/animation sync during combat can still drift slightly on the client's screen.
+**Status: early and still rough around the edges.** Most of a normal playthrough works - walking, fighting, looting, trading, dialogue, travel, saving - but this is a solo hobby project reverse-engineering undocumented engine internals, not a polished release. Known gaps:
+- Perks that change combat (Bonus Move, Better Criticals...) don't apply to the joining player's character yet; perks that change stats or skills do.
+- Combat animation sync between the two screens is much better than it was but not perfect.
+- Tested on a LAN/localhost and over Radmin VPN between two machines on Windows; the macOS build is untested.
 
 ### How to play
-1. Both players need their own legally-owned copy of Fallout 1's game data (see Installation below) alongside this mod's `fallout-ce.exe`.
-2. One player hosts: launch with `--coop-name=HOST`, load a save, press **F9**.
-3. The other joins: launch with `--coop-name=CLIENT --coop-connect=<host's IP>`, load any save, press **F9**.
-4. Add `--coop-debug` to either to write a `coopnet_debug.log` next to the executable, useful for reporting bugs.
+1. Both players need their own legally-owned copy of Fallout 1's game data (see Installation below) next to this mod's `fallout-ce.exe`. **Both must use the exact same exe** (a mismatch is refused with a clear message).
+2. **Host:** start the game (`Host.bat`), load a save, press **F9**, then **H**. The co-op screen lists the addresses to give your friend (home network, Radmin VPN...).
+3. **Joining player:** don't start a game at all. On the **main menu press F9**, pick a saved co-op character or press **N** to create one with the normal character screens, type the host's address and press Enter. The host's world loads for you.
+4. Your character levels up on your own PC through the normal character screen; the host keeps a copy with each of its saves and hands it back when you reconnect.
+5. The F9 screen shows a live log of the connection (and why an attempt failed), a Glitches tab, and **R** saves a `coop_report.txt` for bug reports. Everything is also written to `coop_connection.log` and `coopnet_debug.log` next to the exe. If the game crashes it writes a `crash_*.dmp` and tells you to send it.
+6. If friends can't connect, the host's Windows Firewall may be blocking the game: run `Allow_Firewall.bat` once (it asks permission first).
 
 ### Contributing / reporting bugs
 Bug reports with steps to reproduce, and a `coopnet_debug.log` from both sides if possible, are genuinely useful — this is actively being worked on. See `src/game/coopnet.cc` for the networking/sync code; most of the coop-specific logic across the codebase is marked with `// Coop:` comments explaining the reasoning behind each fix.
