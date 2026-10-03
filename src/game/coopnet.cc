@@ -931,6 +931,9 @@ static char g_coopHostLastMapName[16] = "";
 // mid-map is never mistaken for a transition, same reasoning as
 // g_coopHostLastMapName's own init.
 static int g_coopHostLastElevation = -1;
+// Set when the client asked for a full resync after loading one of its own
+// saves: the next map "change" is then only a re-send, not a real transition.
+static bool g_coopHostResyncOnly = false;
 
 // Host-side only: whether COOP_GAME_OVER_COMPANION_DIED has already been
 // sent for the current companion, so coopnet_host_check_companion_death()
@@ -1620,6 +1623,9 @@ static Object* coopnet_find_or_spawn_companion(int pid, int tile, int elevation)
         // guards against a companion object created by an older build
         // (before this fix existed) still being wrong.
         existing->data.critter.combat.team = 0;
+        if (existing->lightIntensity < 0x10000) {
+            obj_set_light(existing, 4, 0x10000, NULL);
+        }
         return existing;
     }
 
@@ -1659,6 +1665,14 @@ static Object* coopnet_find_or_spawn_companion(int pid, int tile, int elevation)
     Rect rect;
     obj_move_to_tile(companion, tile, elevation, &rect);
     tile_refresh_rect(&rect, elevation);
+
+    // The player's own character carries a light (object.cc, obj_init) so it
+    // can be seen in dark places; the companion -- the client's character --
+    // had none, so on dark maps the client could not see himself.
+    Rect lightRect;
+    if (obj_set_light(companion, 4, 0x10000, &lightRect) != -1) {
+        tile_refresh_rect(&lightRect, elevation);
+    }
 
     // OBJECT_NO_SAVE matters just as much as OBJECT_NO_REMOVE here, and was
     // missing until this was confirmed via testing: real party members get
@@ -3706,7 +3720,16 @@ static void coopnet_host_check_map_transition()
         return;
     }
 
-    if (mapChanged) {
+    bool resyncOnly = g_coopHostResyncOnly;
+    g_coopHostResyncOnly = false;
+
+    if (mapChanged && resyncOnly && g_coopCompanion != NULL) {
+        // The client only reloaded a save of its own: the host's map and its
+        // companion are untouched. Destroying the companion here (mid-fight it
+        // is in the combat list and has its turn running) broke the whole
+        // combat -- just tell the client where everything is.
+        debug_printf("\nCoop: client resync on %.16s, keeping the host's companion as it is\n", map_data.name);
+    } else if (mapChanged) {
         debug_printf("\nCoop: host map changed to %.16s, respawning companion (old companion=%p pid=%d tile=%d)\n",
             map_data.name, (void*)g_coopCompanion, g_coopCompanion != NULL ? g_coopCompanion->pid : -1, g_coopCompanion != NULL ? g_coopCompanion->tile : -1);
 
@@ -4660,6 +4683,7 @@ static void coopnet_poll_host()
                 // The client loaded a save: its objects (companion included) are
                 // gone. Forget what it has and send everything again.
                 g_coopHostLastMapName[0] = '\0';
+                g_coopHostResyncOnly = true;
                 coopnet_host_reset_world_shadow();
                 coopnet_host_broadcast_companion_inventory();
                 debug_printf("\nCoop: client asked for a full resync\n");
@@ -5277,6 +5301,16 @@ static void coopnet_apply_combat_participant(const CoopCombatParticipant& p)
             }
         }
         object = bestCandidate;
+
+        // The client's own save can hold this NPC as a corpse (it was killed in
+        // an earlier session on the client's side) while the host's one is
+        // alive -- Ian lay on the ground on the client's screen but stood on the
+        // host's. The host is right: drop that corpse and mirror a living one.
+        if (object != NULL && !p.isDead && p.hp > 0 && critter_is_dead(object)) {
+            debug_printf("\nCoop: client copy of id=%d (pid=%d) is a corpse but the host's is alive -- replacing it\n", p.id, p.pid);
+            obj_destroy(object);
+            object = NULL;
+        }
 
         if (object == NULL) {
             if (obj_pid_new(&object, p.pid) == -1) {

@@ -163,6 +163,7 @@ int scripts_request_combat(STRUCT_664980* a1);
 void scripts_request_townmap();
 void scripts_request_worldmap();
 int scripts_request_elevator(int elevator);
+bool scripts_elevator_requested();
 int scripts_request_explosion(int tile, int elevation, int minDamage, int maxDamage);
 void scripts_request_dialog(Object* a1);
 void scripts_request_endgame_slideshow();

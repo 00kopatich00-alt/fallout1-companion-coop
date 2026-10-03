@@ -1204,6 +1204,23 @@ int obj_use(Object* a1, Object* a2)
         }
 
         scriptOverrides = script->scriptOverrides;
+
+        if (scriptUser != a1) {
+            debug_printf("\nCoop-debug: companion used scenery pid=%d type=%d sid=%d scriptOverrides=%d elevatorRequested=%d\n",
+                a2->pid, sceneryProto->scenery.type, sid, scriptOverrides ? 1 : 0, scripts_elevator_requested() ? 1 : 0);
+        }
+    }
+
+    // Coop: an elevator control the companion used whose script did not raise
+    // the floor-select request on its own (the script's checks are written
+    // around the player, or it has no script) -- raise it from the prototype's
+    // own elevator type so the client can still ride the elevator.
+    if (a1 != obj_dude && a1 == coopnet_get_companion()
+        && sceneryProto->scenery.type == SCENERY_TYPE_ELEVATOR && !scripts_elevator_requested()) {
+        debug_printf("\nCoop-debug: raising elevator request type=%d for the companion\n", sceneryProto->scenery.data.elevator.type);
+        coopnet_note_companion_used_object();
+        scripts_request_elevator(sceneryProto->scenery.data.elevator.type);
+        scriptOverrides = true;
     }
 
     if (!scriptOverrides) {
