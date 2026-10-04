@@ -622,9 +622,9 @@ int register_object_move_to_object(Object* owner, Object* destination, int actio
 
     curr_anim_counter++;
 
-    // Coop: see coopnet_notify_move_to_object()'s comment.
-    coopnet_notify_move_to_object(owner, destination, false, actionPoints);
-
+    // Coop: the move is announced to the client when its path is actually built
+    // (coop_notify_planned_move()), not here -- registration says nothing about
+    // whether the move will happen or where it will end.
     return register_object_turn_towards(owner, destination->tile);
 }
 
@@ -666,10 +666,7 @@ int register_object_run_to_object(Object* owner, Object* destination, int action
 
     curr_anim_counter++;
 
-    // Coop: see coopnet_notify_move_to_object()'s comment. `anim` was just
-    // resolved to walk or run above (crippled legs / sneaking downgrade a run).
-    coopnet_notify_move_to_object(owner, destination, animationDescription->anim == ANIM_RUNNING, actionPoints);
-
+    // Coop: announced from coop_notify_planned_move(), see register_object_move_to_object().
     return register_object_turn_towards(owner, destination->tile);
 }
 
@@ -704,9 +701,7 @@ int register_object_move_to_tile(Object* owner, int tile, int elevation, int act
 
     curr_anim_counter++;
 
-    // Coop: see coopnet_notify_move()'s comment.
-    coopnet_notify_move(owner, tile, elevation, false, actionPoints);
-
+    // Coop: announced from coop_notify_planned_move(), see register_object_move_to_object().
     return 0;
 }
 
@@ -749,10 +744,7 @@ int register_object_run_to_tile(Object* owner, int tile, int elevation, int acti
 
     curr_anim_counter++;
 
-    // Coop: see coopnet_notify_move()'s comment. `anim` was just resolved
-    // to walk or run above (crippled legs / sneaking downgrade a run).
-    coopnet_notify_move(owner, tile, elevation, animationDescription->anim == ANIM_RUNNING, actionPoints);
-
+    // Coop: announced from coop_notify_planned_move(), see register_object_move_to_object().
     return 0;
 }
 
@@ -2215,6 +2207,36 @@ int make_straight_path_func(Object* a1, int from, int to, StraightPathNode* path
 }
 
 // 0x416258
+// Coop (host): tells the client about a walk/run once its path really exists,
+// as the tile the critter will actually end on -- the path cut to the action
+// points it has left in combat. Announcing at registration time (the old way)
+// also described moves that then never happened (no path, blocked, out of
+// action points) and moves whose end tile differed from the requested one, so
+// the client's copy ran to places the host's critter never reached.
+static void coop_notify_planned_move(Object* obj, int sadIndex, int anim)
+{
+    AnimationSad* sad_entry = &(sad[sadIndex]);
+    int steps = sad_entry->field_1C;
+
+    if (isInCombat() && FID_TYPE(obj->fid) == OBJ_TYPE_CRITTER) {
+        int budget = obj->data.critter.combat.ap + combat_free_move;
+        if (budget < steps) {
+            steps = budget;
+        }
+    }
+
+    if (steps <= 0) {
+        return;
+    }
+
+    int tile = obj->tile;
+    for (int index = 0; index < steps; index++) {
+        tile = tile_num_in_direction(tile, sad_entry->rotations[index], 1);
+    }
+
+    coopnet_notify_move(obj, tile, obj->elevation, anim == ANIM_RUNNING, -1);
+}
+
 static int anim_move_to_object(Object* from, Object* to, int a3, int anim, int animationSequenceIndex)
 {
     bool hidden = (to->flags & OBJECT_HIDDEN);
@@ -2250,6 +2272,8 @@ static int anim_move_to_object(Object* from, Object* to, int a3, int anim, int a
     if (a3 != -1 && a3 < sad_entry->field_1C) {
         sad_entry->field_1C = a3;
     }
+
+    coop_notify_planned_move(from, moveSadIndex, anim);
 
     return 0;
 }
@@ -2456,6 +2480,8 @@ static int anim_move_to_tile(Object* obj, int tile, int elev, int a4, int anim, 
             sad_entry->field_1C = a4;
         }
     }
+
+    coop_notify_planned_move(obj, v1, anim);
 
     return 0;
 }
