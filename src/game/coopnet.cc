@@ -1083,7 +1083,15 @@ static void coopnet_client_run_pending_sfx()
     uint32_t now = coopnet_now_ms();
     for (size_t i = 0; i < g_coopPendingSfx.size();) {
         if (now >= g_coopPendingSfx[i].dueMs) {
-            int rc = gsound_play_sfx_file(g_coopPendingSfx[i].name);
+            // Loaded for a character, not for nobody: a character's sound (climbing,
+            // drawing a weapon) often exists only under its generic name and is
+            // found through the alias lookup that needs an object. Without one the
+            // load failed and the sound never played.
+            int rc = -1;
+            Sound* sound = gsound_load_sound(g_coopPendingSfx[i].name, g_coopCompanion != NULL ? g_coopCompanion : obj_dude);
+            if (sound != NULL) {
+                rc = gsound_play_sound(sound);
+            }
             debug_printf("\nCoop: playing attack sound %s -> %d\n", g_coopPendingSfx[i].name, rc);
             g_coopPendingSfx.erase(g_coopPendingSfx.begin() + i);
         } else {
