@@ -157,6 +157,7 @@ enum CoopMsgType : uint8_t {
     COOP_MSG_CHAR_BLOB = 62, // client -> host, the client's whole saved character (progress included) to be kept with the host's save -- see CoopCharBlob
     COOP_MSG_CHAR_RESTORE = 63, // host -> client, "this is how far that character got in MY world" -- the client applies it -- see CoopCharBlob
     COOP_MSG_XP = 64, // host -> client, experience the party just earned -- see CoopXp
+    COOP_MSG_HEAD_FRAME = 65, // host -> client, the talking-head frame the host just drew -- see CoopHeadFrame
 };
 
 // Experience the host's party earned (kills and quests alike). Each player keeps
@@ -164,6 +165,14 @@ enum CoopMsgType : uint8_t {
 // level-up happens on the client's PC through the normal character screen.
 struct CoopXp {
     int32_t amount;
+};
+
+// The talking head is animated at random (which fidget, when) and follows the
+// voice's phonemes, so two copies never agree. The host's drawn frames are sent
+// instead: which head art (fid) and which frame of it.
+struct CoopHeadFrame {
+    int32_t fid;
+    int32_t frame;
 };
 
 // A whole character, in the game's own character-file format (stats, skills,
@@ -214,7 +223,7 @@ struct CoopSettings {
 // Bumped whenever behavior changes in a way an older exe on the other side
 // would misread -- a mismatch is now refused with a clear message (see the
 // HELLO handling) instead of producing confusing half-working sessions.
-const uint32_t kCoopProtocolVersion = 2;
+const uint32_t kCoopProtocolVersion = 3;
 
 struct CoopHello {
     uint32_t protocolVersion;
@@ -477,6 +486,10 @@ struct CoopDialogueVisualBegin {
     // talking to" view showed some unrelated patch of ground.
     int32_t targetTile;
     int32_t targetElevation;
+    // The talking-head background the NPC's script chose (start_gdialog's last
+    // argument). The client never runs that script, so it always showed its
+    // default one.
+    int32_t background;
 };
 
 // Host -> client: the shared game has ended (see coopnet_notify_game_over()'s
@@ -953,6 +966,10 @@ static bool g_coopCompanionGameOverSent = false;
 // exactly what an "Application (Not Responding)" hang looks like, and
 // confirmed to reproduce this way during combat testing.
 const uint32_t kCoopSendTimeoutMs = 2000;
+
+// While set, coopnet_send_message() gives up at once (instead of waiting up to
+// kCoopSendTimeoutMs) when the socket buffer has no room for the message.
+static bool g_coopSendDroppable = false;
 
 // NOTE: deliberately very generous for now while the engine's background-focus
 // behavior (see GNW95_lost_focus) is still being made fully reliable during
@@ -1458,6 +1475,14 @@ static bool coopnet_send_message(CoopSocket sock, uint8_t type, const void* payl
         int rc = send(sock, reinterpret_cast<const char*>(buf) + sent, total - sent, 0);
         if (rc <= 0) {
             if (coopnet_would_block()) {
+                // Repeating state (screen tiles, positions, the world stream) is
+                // simply sent again later: when the peer isn't draining its socket
+                // (its game is paused, or sitting in a menu) don't wait for it --
+                // the host used to stall two seconds per message and froze.
+                // Only before the first byte, so a message is never left half-sent.
+                if (g_coopSendDroppable && sent == 0) {
+                    return false;
+                }
                 if (coopnet_now_ms() - startMs > kCoopSendTimeoutMs) {
                     coopnet_report_glitch("send() timed out (buffer never drained), dropping message type=%d\n", type);
                     return false;
@@ -2631,9 +2656,16 @@ void coopnet_note_client_led_exit()
     g_coopTravelClientDrivesMs = coopnet_now_ms();
 }
 
+// A conversation the client was driving just ended (see coopnet_notify_dialogue_end()):
+// a world-map trip that starts right after it is the client's -- the NPC sent
+// the party away ("get out of town") as the answer to what the client picked.
+static uint32_t g_coopTravelAfterClientDialogueMs = 0;
+
 void coopnet_travel_screen_begin()
 {
-    bool clientDrives = g_coopTravelClientDrives && coopnet_now_ms() - g_coopTravelClientDrivesMs < 15000;
+    bool afterClientDialogue = g_coopTravelAfterClientDialogueMs != 0 && coopnet_now_ms() - g_coopTravelAfterClientDialogueMs < 5000;
+    g_coopTravelAfterClientDialogueMs = 0;
+    bool clientDrives = (g_coopTravelClientDrives && coopnet_now_ms() - g_coopTravelClientDrivesMs < 15000) || afterClientDialogue;
     g_coopTravelClientDrives = false;
     coopnet_remote_begin_internal(!clientDrives, true);
 }
@@ -2792,7 +2824,8 @@ static void coopnet_remote_host_tick()
     const int kMaxTilesPerTick = 100;
     int sent = 0;
     bool anyLeft = false;
-    for (int ty = 0; ty * kCoopRemoteTile < h; ty++) {
+    g_coopSendDroppable = true;
+    for (int ty = 0; ty * kCoopRemoteTile < h && !(anyLeft && sent == 0); ty++) {
         for (int tx = 0; tx * kCoopRemoteTile < w; tx++) {
             CoopRemoteTile tile;
             tile.tx = static_cast<int16_t>(tx);
@@ -2841,6 +2874,7 @@ static void coopnet_remote_host_tick()
         }
     }
 
+    g_coopSendDroppable = false;
     (void)anyLeft;
 }
 
@@ -2908,6 +2942,25 @@ static int SDLCALL coopnet_mouse_press_watch(void* userdata, SDL_Event* event)
 static bool g_coopPendingTransitionValid = false;
 static CoopMapTransition g_coopPendingTransition;
 static void coopnet_client_apply_map_transition(const CoopMapTransition& transition);
+
+// Nonzero while a cutscene plays -- see coopnet_movie_begin() in coopnet.h.
+static int g_coopMovieDepth = 0;
+
+void coopnet_movie_begin()
+{
+    g_coopMovieDepth++;
+}
+
+void coopnet_movie_end()
+{
+    if (g_coopMovieDepth > 0) {
+        g_coopMovieDepth--;
+    }
+    if (g_coopMovieDepth == 0 && g_coopPendingTransitionValid && !g_coopRemoteClientActive) {
+        g_coopPendingTransitionValid = false;
+        coopnet_client_apply_map_transition(g_coopPendingTransition);
+    }
+}
 static int g_coopRemoteW = 0;
 static int g_coopRemoteH = 0;
 static std::vector<uint8_t> g_coopRemoteFrame;
@@ -3382,7 +3435,11 @@ static void coopnet_host_broadcast_world()
     Object* anchors[2] = { obj_dude, g_coopCompanion };
     for (int a = 0; a < 2; a++) {
         Object* anchor = anchors[a];
-        if (anchor == NULL || (a == 1 && anchor->elevation == obj_dude->elevation)) {
+        // The client's character (the companion) is an anchor too, also on the
+        // host's own elevation: it used to be skipped there, so everything
+        // around a client who had wandered away from the host was never sent
+        // and only appeared once the host walked up to it.
+        if (anchor == NULL) {
             continue;
         }
 
@@ -3390,6 +3447,16 @@ static void coopnet_host_broadcast_world()
             if (FID_TYPE(critter->fid) == OBJ_TYPE_ITEM) {
                 if ((critter->flags & OBJECT_HIDDEN) == 0 && critter->tile != -1 && itemsNow.size() < 400
                     && tile_dist(critter->tile, anchor->tile) <= kCoopWorldRadius) {
+                    bool alreadyListed = false;
+                    for (size_t n = 0; n < itemsNow.size(); n++) {
+                        if (itemsNow[n].pid == critter->pid && itemsNow[n].tile == critter->tile && itemsNow[n].elevation == critter->elevation) {
+                            alreadyListed = true;
+                            break;
+                        }
+                    }
+                    if (alreadyListed) {
+                        continue;
+                    }
                     CoopWorldItemShadow key;
                     key.pid = critter->pid;
                     key.tile = critter->tile;
@@ -3701,7 +3768,7 @@ void coopnet_host_map_load_leave()
 
 static void coopnet_host_check_map_transition()
 {
-    if (g_coopHostMapLoadDepth > 0) {
+    if (g_coopHostMapLoadDepth > 0 || g_coopMovieDepth > 0) {
         return;
     }
 
@@ -4935,12 +5002,17 @@ static void coopnet_poll_host()
         }
 
         if (!disconnected && now - g_coopLastBroadcastTimeMs >= kCoopBroadcastIntervalMs) {
+            // Repeating state: a tick the peer has no room for is just skipped.
+            bool wasDroppable = g_coopSendDroppable;
+            g_coopSendDroppable = true;
             coopnet_host_broadcast_positions();
             coopnet_host_broadcast_game_time();
             coopnet_host_broadcast_combat_participants();
             coopnet_host_broadcast_world();
-            coopnet_host_broadcast_gvars();
             coopnet_host_broadcast_settings();
+            g_coopSendDroppable = wasDroppable;
+            // Changes are only sent once, so these may wait for the peer.
+            coopnet_host_broadcast_gvars();
             g_coopLastBroadcastTimeMs = now;
         }
 
@@ -6396,7 +6468,7 @@ static void coopnet_poll_client()
             } else if (type == COOP_MSG_MAP_TRANSITION && payloadLen == sizeof(CoopMapTransition)) {
                 CoopMapTransition transition;
                 memcpy(&transition, payload, sizeof(transition));
-                if (g_coopRemoteClientActive) {
+                if (g_coopRemoteClientActive || g_coopMovieDepth > 0) {
                     g_coopPendingTransition = transition;
                     g_coopPendingTransitionValid = true;
                 } else {
@@ -6468,6 +6540,7 @@ static void coopnet_poll_client()
                 // follows the plain BEGIN for the same conversation, but
                 // safe either way).
                 coopnet_close_dialogue_window();
+                gdialog_set_background(visualBegin.background);
                 coopnet_client_begin_dialogue_visual(visualBegin.headFid, visualBegin.reaction);
 
                 // Show who is being talked to: centre the camera on the
@@ -6634,6 +6707,10 @@ static void coopnet_poll_client()
                 CoopCharBlob restore;
                 memcpy(&restore, payload, sizeof(restore));
                 coopnet_client_apply_restore(restore);
+            } else if (type == COOP_MSG_HEAD_FRAME && payloadLen == sizeof(CoopHeadFrame)) {
+                CoopHeadFrame headFrame;
+                memcpy(&headFrame, payload, sizeof(headFrame));
+                coopnet_client_apply_head_frame(headFrame.fid, headFrame.frame);
             } else if (type == COOP_MSG_XP && payloadLen == sizeof(CoopXp)) {
                 CoopXp xp;
                 memcpy(&xp, payload, sizeof(xp));
@@ -7044,8 +7121,13 @@ void coopnet_end_attack_sfx()
 
 void coopnet_notify_attack_sfx(Object* owner, const char* soundName, int delay)
 {
+    // An attack's own sounds, and anything else the two characters do that makes
+    // a sound (climbing a ladder, drawing a weapon, picking something up): the
+    // client replays the movements but not their sound.
+    bool attackSound = g_coopAttackSfxAttacker != NULL && owner == g_coopAttackSfxAttacker;
+    bool partySound = owner != NULL && (owner == obj_dude || owner == g_coopCompanion);
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected
-        || g_coopAttackSfxAttacker == NULL || owner != g_coopAttackSfxAttacker || soundName == NULL) {
+        || (!attackSound && !partySound) || soundName == NULL) {
         return;
     }
     CoopAttackSfx msg;
@@ -7972,6 +8054,9 @@ void coopnet_notify_dialogue_begin()
 
 void coopnet_notify_dialogue_end()
 {
+    if (g_coopDialogueDrivenByClient) {
+        g_coopTravelAfterClientDialogueMs = coopnet_now_ms();
+    }
     g_coopDialogueDrivenByClient = false;
     g_coopDialogueDriverPending = false;
     g_coopDialogueHostInitiated = false;
@@ -8029,9 +8114,22 @@ void coopnet_notify_dialogue_visual_begin(int headFid, int reaction)
     msg.reaction = reaction;
     msg.targetTile = dialog_target != NULL ? dialog_target->tile : -1;
     msg.targetElevation = dialog_target != NULL ? dialog_target->elevation : 0;
+    msg.background = gdialog_get_background();
 
     bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_DIALOGUE_VISUAL_BEGIN, &msg, sizeof(msg));
     debug_printf("\nCoop: notified peer dialogue visual began (headFid=%d reaction=%d) success=%d\n", headFid, reaction, sent);
+}
+
+void coopnet_notify_head_frame(int fid, int frame)
+{
+    if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected || fid == -1) {
+        return;
+    }
+
+    CoopHeadFrame msg;
+    msg.fid = fid;
+    msg.frame = frame;
+    coopnet_send_message(g_coopPeerSocket, COOP_MSG_HEAD_FRAME, &msg, sizeof(msg));
 }
 
 void coopnet_notify_dialogue_visual_end()

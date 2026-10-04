@@ -506,6 +506,17 @@ void coopnet_notify_dialogue_state(int replyListId, int replyMsgId, const char* 
 // lookup just used.
 void coopnet_notify_dialogue_visual_begin(int headFid, int reaction);
 void coopnet_notify_dialogue_visual_end();
+// Host: a talking-head frame was just drawn (gdialog.cc); the client draws the same.
+void coopnet_notify_head_frame(int fid, int frame);
+
+// A cutscene is playing (gmovie.cc). Its own loop polls the network, and a map
+// change handled from inside it -- the host noticing a new map, the client
+// loading one -- ran in the middle of whatever was processing the game-time
+// event that started the movie, and both games hung. While a movie plays the
+// host does not announce map changes and the client holds them back; the held
+// one is applied by coopnet_movie_end().
+void coopnet_movie_begin();
+void coopnet_movie_end();
 
 // Host-side only, called from worldmap.cc when the host opens/closes the
 // world map screen, and periodically (every loop iteration -- internally

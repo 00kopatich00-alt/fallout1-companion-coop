@@ -186,6 +186,9 @@ int gmovie_play(int game_movie, int game_movie_flags)
 
     moviefx_start(movieFilePath);
 
+    // Coop: no map changes are announced or applied while the cutscene plays.
+    coopnet_movie_begin();
+
     movieRun(win, movieFilePath);
 
     int v11 = 0;
@@ -261,6 +264,9 @@ int gmovie_play(int game_movie, int game_movie_flags)
 
         palette_fade_to(cmap);
     }
+
+    // Coop: a map change that came in during the cutscene is applied now.
+    coopnet_movie_end();
 
     return 0;
 }

@@ -1199,8 +1199,19 @@ int obj_use(Object* a1, Object* a2)
             coopnet_note_companion_used_object();
         }
 
+        int partyElevation = obj_dude->elevation;
+        int partyTile = obj_dude->tile;
+
         scr_set_objs(sid, scriptUser, a2);
         exec_script_proc(sid, SCRIPT_PROC_USE);
+
+        // Coop: a ladder (its script moves "the player" to the level above or
+        // below) took the host's character somewhere else -- the other half of
+        // the party goes with it, otherwise the client stayed upstairs while the
+        // host went down (or the other way round).
+        if (obj_dude->elevation != partyElevation || tile_dist(obj_dude->tile, partyTile) > 4) {
+            coopnet_host_move_companion_with_dude();
+        }
 
         Script* script;
         if (scr_ptr(sid, &script) == -1) {
@@ -1735,6 +1746,11 @@ int obj_toggle_open(Object* obj)
     }
 
     obj_unjam_lock(obj);
+
+    // Coop: anything that opens or closes through here -- a script's obj_open()
+    // on a sewer hatch, a cover, a gate -- is announced to the client, not only
+    // the doors that go through obj_use_door(). Applying it there is idempotent.
+    coopnet_notify_scenery_state(obj, obj->frame == 0);
 
     register_begin(ANIMATION_REQUEST_RESERVED);
 

@@ -1198,7 +1198,18 @@ static void _MVE_sndSync()
         return;
     }
 
+    // Coop: this loop waits for the audio clock to move on. With two game
+    // windows on one PC (the test setup) or a stalled audio device the clock
+    // can stop, and the loop then spun for ever -- both games froze on the
+    // first cutscene ("Not responding", the watchdog's stack ends right here).
+    // Give up after a moment and carry on without audio sync.
+    const unsigned int syncStartMs = SDL_GetTicks();
+
     while (1) {
+        if (SDL_GetTicks() - syncStartMs > 750) {
+            break;
+        }
+
         if (!audioEngineSoundBufferGetStatus(gMveSoundBuffer, &dwStatus)) {
             return;
         }
