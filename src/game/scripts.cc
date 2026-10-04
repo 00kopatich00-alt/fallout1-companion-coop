@@ -2460,11 +2460,22 @@ bool scr_chk_spatials_in(Object* object, int tile, int elevation)
             if (coopCompanionSpatialBlock) {
                 debug_printf("\nCoop-debug: companion spatial trigger on V13ENT BLOCKED, script sid=%d tile=%d\n", script->scr_id, tile);
             } else {
-                if (object == coopnet_get_companion()) {
+                // Coop: spatial scripts (the Vault 13 elevators -- elev6.int on
+                // each level -- the vault door's lock, ...) only react to "the
+                // player" stepping on them: they compare the triggering object
+                // with dude_obj. The client's companion is not obj_dude, so
+                // every one of them silently did nothing for the client. It
+                // is the player's party: run them as the host's character, as
+                // is done for doors and other objects the companion uses.
+                Object* spatialSource = object;
+                if (object != obj_dude && object == coopnet_get_companion()) {
                     debug_printf("\nCoop-debug: companion spatial trigger fired, script sid=%d tile=%d map=%.16s\n", script->scr_id, tile, map_data.name);
+                    spatialSource = obj_dude;
+                    // Whatever screen it opens (an elevator's floor choice) is the client's to drive.
+                    coopnet_note_companion_used_object();
                 }
                 // NOTE: Uninline.
-                scr_set_objs(script->scr_id, object, NULL);
+                scr_set_objs(script->scr_id, spatialSource, NULL);
                 exec_script_proc(script->scr_id, SCRIPT_PROC_SPATIAL);
             }
         }

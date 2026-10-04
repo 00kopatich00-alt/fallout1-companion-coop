@@ -668,7 +668,9 @@ int critter_kill_count_type(Object* obj)
         return -1;
     }
 
-    proto_ptr(obj->pid, &proto);
+    if (proto_ptr(obj->pid, &proto) == -1 || proto == NULL) {
+        return -1;
+    }
 
     return proto->critter.data.killType;
 }

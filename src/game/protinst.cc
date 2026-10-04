@@ -1154,6 +1154,10 @@ int obj_use(Object* a1, Object* a2)
     int sid = -1;
     bool scriptOverrides = false;
 
+    if (a1 != obj_dude && a1 == coopnet_get_companion()) {
+        debug_printf("\nCoop-debug: obj_use reached for the companion: pid=%d type=%d tile=%d\n", a2->pid, type, a2->tile);
+    }
+
     if (a1 == obj_dude) {
         if (type != OBJ_TYPE_SCENERY) {
             return -1;
@@ -1341,6 +1345,16 @@ int obj_use_door(Object* a1, Object* a2, int a3)
 {
     int sid = -1;
     bool scriptOverrides = false;
+
+    // Coop: on the client a door only ever changes because the host says so
+    // (COOP_MSG_SCENERY_STATE, applied with obj_open()/obj_close(), which do not
+    // come through here). The client's own mirrored critters used to open and
+    // close doors by themselves while replaying the host's walks, at their own
+    // moments, so a door was open on one screen and shut on the other and the
+    // two worlds' paths and positions drifted apart in a fight.
+    if (coopnet_get_role() == CoopRole::Client) {
+        return 0;
+    }
 
     // Coop: a map-wide "the companion can't open ANY door on VAULT13" block
     // used to live here, aimed at just the vault's own exit door -- reverted,
