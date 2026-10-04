@@ -2360,6 +2360,24 @@ static void coopnet_host_explain_refused_attack(int badShot, int hitMode, bool a
     coopnet_send_message(g_coopPeerSocket, COOP_MSG_COMBAT_TEXT, &msg, sizeof(msg));
 }
 
+static void coopnet_host_apply_combat_attack(int32_t targetId, int32_t targetTile, int32_t targetPid, int32_t clientHitMode, int32_t clientHitLocation);
+
+// A move or attack the client chose that arrived while the companion was still
+// animating -- run by coopnet_combat_input()'s loop as soon as it is idle.
+static CoopCombatAction g_coopHostPendingCombatAction;
+static bool g_coopHostPendingCombatActionValid = false;
+
+static void coopnet_host_run_combat_action(const CoopCombatAction& action)
+{
+    if (action.actionType == COOP_COMBAT_ACTION_MOVE) {
+        debug_printf("\nCoop: received COMBAT_ACTION move targetTile=%d\n", action.targetTile);
+        coopnet_host_apply_combat_move(action.targetTile);
+    } else if (action.actionType == COOP_COMBAT_ACTION_ATTACK) {
+        debug_printf("\nCoop: received COMBAT_ACTION attack targetId=%d\n", action.targetId);
+        coopnet_host_apply_combat_attack(action.targetId, action.targetTile, action.targetPid, action.hitMode, action.hitLocation);
+    }
+}
+
 static void coopnet_host_apply_combat_attack(int32_t targetId, int32_t targetTile, int32_t targetPid, int32_t clientHitMode, int32_t clientHitLocation)
 {
     if (g_coopCompanion == NULL) {
@@ -4218,7 +4236,13 @@ static void coopnet_host_process_action_queue()
                 // only elevator_select() checks it) -- harmlessly expires
                 // unused for every other kind of "use" (doors, etc.).
                 coopnet_note_companion_used_object();
-                action_use_an_object(g_coopCompanion, object);
+                int useRc = action_use_an_object(g_coopCompanion, object);
+                int useSid = -1;
+                obj_sid(object, &useSid);
+                Proto* useProto = NULL;
+                proto_ptr(object->pid, &useProto);
+                debug_printf("\nCoop-debug: companion use of pid=%d -> action rc=%d, scenery type=%d, script sid=%d\n",
+                    object->pid, useRc, useProto != NULL ? useProto->scenery.type : -1, useSid);
             } else {
                 if (action_use_skill_on(g_coopCompanion, object, request.skill) == -1) {
                     coopnet_report_glitch("action_use_skill_on failed (skill=%d)\n", request.skill);
@@ -4249,6 +4273,13 @@ static char g_coopActiveCharPath[80] = "";
 // Host: this world's record of the client's character (blobLen 0 = none yet).
 // Written into the host's save slot with the rest of the client's profile.
 static CoopCharBlob g_coopHostCharRecord;
+
+// Host: the character as the client joined this session (for a save that has no
+// record of its own), the experience of the last progress report the host
+// accepted, and the experience the host itself handed out since then.
+static CoopCharBlob g_coopHostJoinBaseline;
+static int32_t g_coopHostAcceptedXp = -1;
+static int64_t g_coopHostXpGranted = 0;
 
 static const char* const kCoopCharTransferPath = "COOPCHARS\\_xfer.tmp";
 
@@ -4378,19 +4409,76 @@ static void coopnet_host_on_char_blob(const CoopCharBlob& incoming)
 
     bool sameCharacter = g_coopHostCharRecord.blobLen > 0 && strncmp(g_coopHostCharRecord.name, incoming.name, sizeof(incoming.name) - 1) == 0;
 
-    // On joining, a character this world already knows with more experience
-    // than the client arrived with is handed back instead of overwritten.
-    if (incoming.kind == 0 && sameCharacter && g_coopHostCharRecord.xp > incoming.xp) {
+    // The host's save is the authority on how far the client's character got in
+    // THIS world -- in both directions. On joining, a character this world
+    // already knows is set back to the record, whether the client arrived with
+    // more experience (progress made in some other session or by loading an
+    // older save of its own) or less.
+    if (incoming.kind == 0 && sameCharacter
+        && (g_coopHostCharRecord.xp != incoming.xp || g_coopHostCharRecord.level != incoming.level)) {
         CoopCharBlob restore = g_coopHostCharRecord;
         restore.kind = 0;
         coopnet_send_message(g_coopPeerSocket, COOP_MSG_CHAR_RESTORE, &restore, sizeof(restore));
-        coopnet_status(COOP_STATUS_INFO, "Sent %s's saved progress (level %d) back to your friend.", restore.name, restore.level);
+        coopnet_status(COOP_STATUS_INFO, "Set %s back to this world's record (level %d, %d XP).", restore.name, restore.level, restore.xp);
+        g_coopHostJoinBaseline = g_coopHostCharRecord;
+        g_coopHostAcceptedXp = restore.xp;
+        g_coopHostXpGranted = 0;
         return;
+    }
+
+    if (incoming.kind == 0) {
+        g_coopHostJoinBaseline = incoming;
+        g_coopHostJoinBaseline.kind = 0;
+    } else if (g_coopHostAcceptedXp >= 0) {
+        // A progress update: the experience can only have risen by what this
+        // host handed out (the client's perks may add a few percent). More than
+        // that means the client brought experience from somewhere else -- undo it.
+        int64_t allowed = static_cast<int64_t>(g_coopHostAcceptedXp) + g_coopHostXpGranted * 5 / 4 + 100;
+        if (incoming.xp > allowed) {
+            const CoopCharBlob* source = g_coopHostCharRecord.blobLen > 0 ? &g_coopHostCharRecord : &g_coopHostJoinBaseline;
+            if (source->blobLen > 0) {
+                CoopCharBlob restore = *source;
+                restore.kind = 0;
+                coopnet_send_message(g_coopPeerSocket, COOP_MSG_CHAR_RESTORE, &restore, sizeof(restore));
+                coopnet_status(COOP_STATUS_WARN, "%s reported more experience than this world gave (%d, expected at most %d) - set back to level %d.", incoming.name, incoming.xp, static_cast<int>(allowed), restore.level);
+                g_coopHostAcceptedXp = restore.xp;
+                g_coopHostXpGranted = 0;
+                return;
+            }
+        }
     }
 
     g_coopHostCharRecord = incoming;
     g_coopHostCharRecord.kind = 0;
+    g_coopHostAcceptedXp = incoming.xp;
+    g_coopHostXpGranted = 0;
     debug_printf("\nCoop: stored character record name=%s level=%d xp=%d (from kind=%d)\n", incoming.name, incoming.level, incoming.xp, incoming.kind);
+}
+
+// Host: a save was just loaded while the client is connected. The save decides
+// how far the client's character is: its own record if it has one, else the
+// character as it joined this session (a save that predates the client). Either
+// way the client is set back -- reloading to kill the same enemies again does
+// not keep the experience.
+static void coopnet_host_push_character_record()
+{
+    if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected) {
+        return;
+    }
+
+    if (g_coopHostCharRecord.blobLen <= 0 && g_coopHostJoinBaseline.blobLen > 0) {
+        g_coopHostCharRecord = g_coopHostJoinBaseline;
+    }
+    if (g_coopHostCharRecord.blobLen <= 0) {
+        return;
+    }
+
+    CoopCharBlob restore = g_coopHostCharRecord;
+    restore.kind = 0;
+    coopnet_send_message(g_coopPeerSocket, COOP_MSG_CHAR_RESTORE, &restore, sizeof(restore));
+    g_coopHostAcceptedXp = restore.xp;
+    g_coopHostXpGranted = 0;
+    coopnet_status(COOP_STATUS_INFO, "Loaded save: %s is back at level %d (%d XP), as in this save.", restore.name, restore.level, restore.xp);
 }
 
 // Client: sends this machine's own character to the host so the companion it
@@ -4687,6 +4775,16 @@ static void coopnet_poll_host()
                 coopnet_host_reset_world_shadow();
                 coopnet_host_broadcast_companion_inventory();
                 debug_printf("\nCoop: client asked for a full resync\n");
+
+                // A client that reloaded in the middle of a fight lost its combat
+                // state (the end-turn buttons, whose turn it is): tell it again.
+                if (isInCombat() && g_coopCompanion != NULL) {
+                    coopnet_send_message(g_coopPeerSocket, COOP_MSG_COMBAT_BEGIN, NULL, 0);
+                    CoopCombatTurn turn;
+                    turn.actionPoints = g_coopHostCombatTurnActive ? g_coopCompanion->data.critter.combat.ap : 0;
+                    coopnet_send_message(g_coopPeerSocket, COOP_MSG_COMBAT_TURN, &turn, sizeof(turn));
+                    debug_printf("\nCoop: re-sent combat state to the client (turnActive=%d ap=%d)\n", g_coopHostCombatTurnActive ? 1 : 0, turn.actionPoints);
+                }
             } else if (type == COOP_MSG_USE_ITEM && payloadLen == sizeof(CoopUseItem)) {
                 CoopUseItem req;
                 memcpy(&req, payload, sizeof(req));
@@ -4808,15 +4906,20 @@ static void coopnet_poll_host()
                 } else {
                     CoopCombatAction action;
                     memcpy(&action, payload, sizeof(action));
-                    if (action.actionType == COOP_COMBAT_ACTION_MOVE) {
-                        debug_printf("\nCoop: received COMBAT_ACTION move targetTile=%d\n", action.targetTile);
-                        coopnet_host_apply_combat_move(action.targetTile);
-                    } else if (action.actionType == COOP_COMBAT_ACTION_END_TURN) {
+                    if (action.actionType == COOP_COMBAT_ACTION_END_TURN) {
                         debug_printf("\nCoop: received COMBAT_ACTION end-turn\n");
                         g_coopHostCombatEndTurnRequested = true;
-                    } else if (action.actionType == COOP_COMBAT_ACTION_ATTACK) {
-                        debug_printf("\nCoop: received COMBAT_ACTION attack targetId=%d\n", action.targetId);
-                        coopnet_host_apply_combat_attack(action.targetId, action.targetTile, action.targetPid, action.hitMode, action.hitLocation);
+                    } else if (g_coopCompanion != NULL && anim_busy(g_coopCompanion)) {
+                        // A shot or a walk is still playing. Starting another
+                        // action now clears the whole running animation sequence,
+                        // which also holds the target's fall -- a killed enemy
+                        // stayed standing on the host. Do it once the animation
+                        // is over (the newest request replaces an older one).
+                        g_coopHostPendingCombatAction = action;
+                        g_coopHostPendingCombatActionValid = true;
+                        debug_printf("\nCoop: COMBAT_ACTION type=%d held until the companion is idle\n", action.actionType);
+                    } else {
+                        coopnet_host_run_combat_action(action);
                     }
                 }
             }
@@ -6017,18 +6120,30 @@ static void coopnet_client_apply_worldmap_state(const CoopWorldmapState& state)
 // (13, '\r', see endCombatButton's own registration in intface.cc) as
 // pressing Enter, which already routes to coopnet_on_client_end_turn()
 // via game.cc's KEY_RETURN handler -- no extra click-wiring needed.
+// Whether the end-turn buttons are currently lit (-1 = not known yet). Lighting
+// them plays a sound, and the host sends an update for every action point the
+// character spends, so doing it on every update beeped with every step.
+static int g_coopClientTurnUiLit = -1;
+
 static void coopnet_client_combat_turn_ui_begin()
 {
+    g_coopClientTurnUiLit = -1;
     intface_end_window_open(true);
 }
 
 static void coopnet_client_combat_turn_ui_set_active(bool active)
 {
     if (active) {
-        intface_end_buttons_enable();
+        if (g_coopClientTurnUiLit != 1) {
+            intface_end_buttons_enable();
+            g_coopClientTurnUiLit = 1;
+        }
         intface_update_move_points(g_coopClientCombatAP, 0);
     } else {
-        intface_end_buttons_disable();
+        if (g_coopClientTurnUiLit != 0) {
+            intface_end_buttons_disable();
+            g_coopClientTurnUiLit = 0;
+        }
         intface_update_move_points(-1, -1);
     }
 }
@@ -6036,6 +6151,7 @@ static void coopnet_client_combat_turn_ui_set_active(bool active)
 static void coopnet_client_combat_turn_ui_end()
 {
     intface_end_buttons_disable();
+    g_coopClientTurnUiLit = -1;
     intface_end_window_close(true);
 }
 
@@ -6417,7 +6533,18 @@ static void coopnet_poll_client()
                     coopnet_client_reset_commanded_tile_for(attacker);
                     register_begin(ANIMATION_REQUEST_RESERVED);
                     register_priority(1);
+                    // Same sequence the host plays (actions.cc, action_ranged()): a
+                    // gun is raised, fired and lowered again. Only the shot was
+                    // replayed, so the raise and the lowering were missing and the
+                    // gun seemed to jump in and out of the hands.
+                    bool rangedShot = attackAnim.anim >= ANIM_FIRE_SINGLE && attackAnim.anim != ANIM_THROW_ANIM;
+                    if (rangedShot) {
+                        register_object_animate(attacker, ANIM_POINT, -1);
+                    }
                     register_object_animate(attacker, attackAnim.anim, 0);
+                    if (rangedShot) {
+                        register_object_animate(attacker, ANIM_UNPOINT, -1);
+                    }
                     register_end();
                 }
             } else if (type == COOP_MSG_OBJECT_ANIM && payloadLen == sizeof(CoopCombatAttackAnim)) {
@@ -6658,6 +6785,8 @@ void coopnet_combat_input(Object* companion)
 
     g_coopHostCombatTurnActive = true;
     g_coopHostCombatEndTurnRequested = false;
+    g_coopHostPendingCombatActionValid = false;
+    uint32_t busySinceMs = 0;
 
     // Last AP value actually sent, so the client's real AP pips
     // (coopnet_client_combat_turn_ui_set_active()) stay live as the
@@ -6673,10 +6802,28 @@ void coopnet_combat_input(Object* companion)
         coopnet_poll();
         process_bk();
 
-        if (companion->data.critter.combat.ap <= 0) {
+        bool companionBusy = anim_busy(companion);
+        if (companionBusy) {
+            if (busySinceMs == 0) {
+                busySinceMs = coopnet_now_ms();
+            }
+        } else {
+            busySinceMs = 0;
+        }
+        // A stuck animation must never hold the turn forever.
+        bool busyTooLong = busySinceMs != 0 && coopnet_now_ms() - busySinceMs > 15000;
+
+        if (!companionBusy && g_coopHostPendingCombatActionValid) {
+            g_coopHostPendingCombatActionValid = false;
+            coopnet_host_run_combat_action(g_coopHostPendingCombatAction);
+        }
+
+        // The turn ends only once the last shot or step has finished playing,
+        // so what the companion just did (a kill included) is shown in full.
+        if (companion->data.critter.combat.ap <= 0 && (!companionBusy || busyTooLong)) {
             break;
         }
-        if (g_coopHostCombatEndTurnRequested) {
+        if (g_coopHostCombatEndTurnRequested && (!companionBusy || busyTooLong)) {
             break;
         }
         if (!coopnet_is_connected()) {
@@ -6698,6 +6845,7 @@ void coopnet_combat_input(Object* companion)
     }
 
     g_coopHostCombatTurnActive = false;
+    g_coopHostPendingCombatActionValid = false;
 
     if (coopnet_is_connected()) {
         CoopCombatTurn endTurn;
@@ -6983,6 +7131,9 @@ void coopnet_host_notify_xp(int xp)
     CoopXp msg;
     msg.amount = xp;
     coopnet_send_message(g_coopPeerSocket, COOP_MSG_XP, &msg, sizeof(msg));
+    if (xp > 0) {
+        g_coopHostXpGranted += xp;
+    }
 }
 
 void coopnet_on_character_screen_closed()
@@ -7046,6 +7197,7 @@ void coopnet_on_game_loaded()
         coopnet_host_reset_world_shadow();
         g_coopCompanion = coopnet_find_or_spawn_companion(obj_dude->pid, obj_dude->tile, obj_dude->elevation);
         coopnet_host_apply_saved_profile();
+        coopnet_host_push_character_record();
         g_coopHostLastMapName[0] = '\0'; // makes the next tick send the client a MAP_TRANSITION
     }
 }
@@ -7126,6 +7278,10 @@ void coopnet_host_load_profile(const char* path)
     memset(&g_coopHostCharRecord, 0, sizeof(g_coopHostCharRecord));
     if (!coopnet_host_read_profile(path)) {
         coopnet_host_read_profile(kCoopAutosavePath);
+        // The autosave is only a stand-in for the client's hp and items. Its
+        // character record is the LATEST state, not this save's: using it would
+        // let loading an older save keep everything the client earned since.
+        memset(&g_coopHostCharRecord, 0, sizeof(g_coopHostCharRecord));
     }
 }
 

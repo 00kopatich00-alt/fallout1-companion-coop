@@ -941,6 +941,10 @@ static int is_next_to(Object* a1, Object* a2)
     MessageListItem messageListItem;
 
     if (obj_dist(a1, a2) > 1) {
+        if (a1 == coopnet_get_companion()) {
+            debug_printf("\nCoop-debug: companion stopped %d tiles from pid=%d (tile %d vs %d): not next to it\n",
+                obj_dist(a1, a2), a2->pid, a1->tile, a2->tile);
+        }
         if (a2 == obj_dude) {
             // You cannot get there.
             messageListItem.num = 2000;
