@@ -214,6 +214,10 @@ static CacheEntry* lipsKey = NULL;
 // 0x504FF4
 static Art* lipsFp = NULL;
 
+// Coop: the head art of the reaction transition being played (its Art* is not
+// fidgetFp or lipsFp), so the host can tell the client which art a frame is from.
+static int headTransitionFid = -1;
+
 // 0x504FF8
 static bool gdialog_speech_playing = false;
 
@@ -713,8 +717,8 @@ void gdialog_enter(Object* target, int a2)
     if (script->scriptOverrides || dialogue_state != 4) {
         // Not a glitch: plenty of NPCs and signs answer a Talk click with just a
         // floating line (or nothing) instead of opening a dialogue. Debug log only.
-        debug_printf("\nCoop: conversation with NPC pid=%d never opened (scriptOverrides=%d dialogue_state=%d clientDriven=%d)\n",
-            target->pid, script->scriptOverrides ? 1 : 0, dialogue_state, coopnet_dialogue_driven_by_client() ? 1 : 0);
+        debug_printf("\nCoop: conversation with NPC pid=%d never opened (scriptOverrides=%d dialogue_state=%d clientDriven=%d scriptIdx=%d)\n",
+            target->pid, script->scriptOverrides ? 1 : 0, dialogue_state, coopnet_dialogue_driven_by_client() ? 1 : 0, script->scr_script_idx);
         dialogue_just_started = 0;
         map_enable_bk_processes();
         scr_exec_map_update_scripts();
@@ -1000,6 +1004,13 @@ void gdialog_set_background(int a1)
     if (a1 != -1) {
         backgroundIndex = a1;
     }
+}
+
+// Coop: the background the running conversation's script chose, sent to the
+// client so its talking-head screen shows the same one.
+int gdialog_get_background()
+{
+    return backgroundIndex;
 }
 
 // 0x43E4B4
@@ -1444,6 +1455,26 @@ static bool g_coopClientDialogueVisualActive = false;
 bool coopnet_client_dialogue_visual_active()
 {
     return g_coopClientDialogueVisualActive;
+}
+
+// Client: draws the head frame the host just drew.
+void coopnet_client_apply_head_frame(int fid, int frame)
+{
+    if (!g_coopClientDialogueVisualActive || dialogueWindow == -1) {
+        return;
+    }
+
+    CacheEntry* key;
+    Art* art = art_ptr_lock(fid, &key);
+    if (art == NULL) {
+        return;
+    }
+
+    if (frame >= 0 && frame < art_frame_max_frame(art)) {
+        talk_to_display_frame(art, frame);
+    }
+
+    art_ptr_unlock(key);
 }
 
 void coopnet_client_begin_dialogue_visual(int headFid, int reaction)
@@ -2387,6 +2418,23 @@ static void head_bk()
         return;
     }
 
+    // Coop: the client's head is drawn from the host's frames
+    // (coopnet_client_apply_head_frame()); only the voice's own housekeeping runs.
+    if (coopnet_get_role() == CoopRole::Client) {
+        if (gdialog_speech_playing) {
+            lips_bkg_proc();
+            lips_draw_head = false;
+
+            if (!soundPlaying(lip_info.sound)) {
+                gdialog_free_speech();
+                can_start_new_fidget = true;
+                dialogue_seconds_since_last_input = 3;
+                fidgetFrameCounter = 0;
+            }
+        }
+        return;
+    }
+
     if (gdialog_speech_playing) {
         lips_bkg_proc();
 
@@ -2434,6 +2482,11 @@ static void head_bk()
 // 0x43FE3C
 void talk_to_critter_reacts(int a1)
 {
+    // Coop: the host's reaction animation reaches the client as drawn frames.
+    if (coopnet_get_role() == CoopRole::Client) {
+        return;
+    }
+
     int v1 = a1 + 1;
 
     debug_printf("Dialogue Reaction: ");
@@ -3728,6 +3781,10 @@ static void talk_to_wait_for_fidget()
         return;
     }
 
+    if (coopnet_get_role() == CoopRole::Client) {
+        return;
+    }
+
     debug_printf("Waiting for fidget to complete...\n");
 
     while (art_frame_max_frame(fidgetFp) > fidgetFrameCounter) {
@@ -3757,6 +3814,11 @@ static void talk_to_play_transition(int anim)
         return;
     }
 
+    // Coop: the host's transition frames arrive over the network.
+    if (coopnet_get_role() == CoopRole::Client) {
+        return;
+    }
+
     mouse_hide();
 
     debug_printf("Starting transition...\n");
@@ -3778,6 +3840,8 @@ static void talk_to_play_transition(int anim)
     }
 
     unsigned int delay = 1000 / art_frame_fps(headFrm);
+
+    headTransitionFid = headFid;
 
     int frame = 0;
     unsigned int time = 0;
@@ -3833,6 +3897,13 @@ static void talk_to_display_frame(Art* headFrm, int frame)
 
     if (dialogueWindow == -1) {
         return;
+    }
+
+    // Coop: the client draws exactly the frames the host draws (see
+    // coopnet_client_apply_head_frame()) instead of animating its own copy.
+    if (headFrm != NULL && coopnet_get_role() == CoopRole::Host) {
+        int shownFid = headFrm == fidgetFp ? fidgetFID : (headFrm == lipsFp ? lipsFID : headTransitionFid);
+        coopnet_notify_head_frame(shownFid, frame);
     }
 
     if (headFrm != NULL) {

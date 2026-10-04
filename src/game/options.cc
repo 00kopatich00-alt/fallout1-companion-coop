@@ -9,6 +9,7 @@
 #include "game/art.h"
 #include "game/combat.h"
 #include "game/combatai.h"
+#include "game/coopnet.h"
 #include "game/cycle.h"
 #include "game/game.h"
 #include "game/gconfig.h"
@@ -750,6 +751,12 @@ int PauseWindow(bool is_world_map)
     bool done = false;
     while (!done) {
         sharedFpsLimiter.mark();
+
+        // Coop: a paused game must keep talking to the other player (heartbeat,
+        // incoming messages). Otherwise the other side's socket fills up and its
+        // game stalls -- the host nearly froze when it changed map while the
+        // client had paused.
+        coopnet_poll();
 
         int keyCode = get_input();
         switch (keyCode) {

@@ -30,6 +30,7 @@ int gDialogDisableBK();
 int scr_dialogue_init(int headFid, int reaction);
 int scr_dialogue_exit();
 void gdialog_set_background(int a1);
+int gdialog_get_background();
 void gdialog_display_msg(char* msg);
 int gDialogStart();
 int gDialogSayMessage();
@@ -52,6 +53,7 @@ void barter_end_to_talk_to();
 // comment in coopnet.h for the full picture. Defined in gdialog.cc, which
 // already has direct access to dialogBlock/gReplyWin/gOptionWin/etc.
 bool coopnet_client_dialogue_visual_active();
+void coopnet_client_apply_head_frame(int fid, int frame);
 bool coopnet_client_dialogue_hover(int keyCode);
 void coopnet_client_begin_dialogue_visual(int headFid, int reaction);
 void coopnet_client_apply_dialogue_visual_state(int replyListId, int replyMsgId, const char* replyText,
