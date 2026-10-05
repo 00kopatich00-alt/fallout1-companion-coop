@@ -1579,15 +1579,17 @@ void obj_coop_focus_roof(int tile, int elevation)
         : 0;
     bool isEmpty = art_id(OBJ_TYPE_TILE, 1, 0, 0, 0) == currentSquareFid;
 
-    if (isEmpty != obj_last_is_empty || (((currentSquare >> 16) & 0xF000) >> 12) != (((previousSquare >> 16) & 0xF000) >> 12)) {
-        if (!obj_last_is_empty) {
-            tile_fill_roof(obj_last_roof_x, obj_last_roof_y, elevation, true);
-        }
-        if (!isEmpty) {
-            tile_fill_roof(roofX, roofY, elevation, false);
-        }
-        tile_refresh_display();
+    // Unlike obj_move_to_tile() (a step to the next square, usually under the same
+    // roof), this jumps anywhere: a speaker in a distant building has the same kind
+    // of roof as the one just left, and skipping the update left it drawn over them.
+    (void)previousSquare;
+    if (!obj_last_is_empty && obj_last_roof_x != -1 && obj_last_roof_y != -1) {
+        tile_fill_roof(obj_last_roof_x, obj_last_roof_y, elevation, true);
     }
+    if (!isEmpty) {
+        tile_fill_roof(roofX, roofY, elevation, false);
+    }
+    tile_refresh_display();
 
     obj_last_roof_x = roofX;
     obj_last_roof_y = roofY;

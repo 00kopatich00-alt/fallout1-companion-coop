@@ -2987,11 +2987,41 @@ static void coopnet_remote_host_apply_input(const CoopRemoteInput& in)
     }
 }
 
+// Mouse buttons as the host last applied them, and when one last went down.
+static int g_coopRemoteAppliedButtons = 0;
+static uint32_t g_coopRemoteDownMs = 0;
+
 static void coopnet_remote_host_apply_one_input()
 {
     if (g_coopRemoteInputQueue.empty()) {
         return;
     }
+
+    {
+        const CoopRemoteInput& next = g_coopRemoteInputQueue.front();
+        uint32_t nowMs = coopnet_now_ms();
+
+        // A press and its release can arrive in the same network batch and would
+        // be applied on consecutive frames -- a tap far shorter than the client's
+        // real one. Picking an item up (which waits for the button to stay down)
+        // then failed and took several tries. Keep a button down for a short
+        // while before applying its release.
+        if ((g_coopRemoteAppliedButtons & ~next.buttons) != 0 && nowMs - g_coopRemoteDownMs < 90) {
+            return;
+        }
+
+        // A press that also moves the pointer: put the pointer on the item first
+        // (one frame), then press, so the press never lands on the old position.
+        if ((next.buttons & ~g_coopRemoteAppliedButtons) != 0) {
+            int hoverX, hoverY;
+            mouse_get_position(&hoverX, &hoverY);
+            if (next.x != hoverX || next.y != hoverY) {
+                mouse_simulate_input(next.x - hoverX, next.y - hoverY, g_coopRemoteAppliedButtons);
+                return;
+            }
+        }
+    }
+
     CoopRemoteInput in = g_coopRemoteInputQueue.front();
     g_coopRemoteInputQueue.erase(g_coopRemoteInputQueue.begin());
 
@@ -3010,6 +3040,10 @@ static void coopnet_remote_host_apply_one_input()
     int curX, curY;
     mouse_get_position(&curX, &curY);
     mouse_simulate_input(in.x - curX, in.y - curY, in.buttons);
+    if ((in.buttons & ~g_coopRemoteAppliedButtons) != 0) {
+        g_coopRemoteDownMs = coopnet_now_ms();
+    }
+    g_coopRemoteAppliedButtons = in.buttons;
 
     if (in.scancode >= 0) {
         KeyboardData data;
@@ -5556,6 +5590,9 @@ static void coopnet_log_npc_move(const char* why, Object* object, const CoopComb
 
 static void coopnet_apply_combat_participant(const CoopCombatParticipant& p)
 {
+    // Out of combat the host is the only one moving NPCs and a runner (a party member keeping up)
+    // can be well ahead of a replay still in progress -- run to it rather than teleport.
+    const int snapDistance = (g_coopClientInCombat || isInCombat()) ? kCoopSnapDistanceThreshold : 20;
     if ((p.pid == 0x1000000 || p.pid == kCoopCompanionPid)) {
         return; // the player prototype is the host character / companion, never a mirrored NPC
     }
@@ -5729,7 +5766,7 @@ static void coopnet_apply_combat_participant(const CoopCombatParticipant& p)
         }
         if (nowMs - g_coopParticipants[index].busySinceMs < 2500
             && object->elevation == p.elevation
-            && tile_dist(object->tile, p.tile) <= kCoopSnapDistanceThreshold) {
+            && tile_dist(object->tile, p.tile) <= snapDistance) {
             return;
         }
     } else {
@@ -5740,6 +5777,21 @@ static void coopnet_apply_combat_participant(const CoopCombatParticipant& p)
     // the client's copy must be on the same tile -- if it isn't (a missed or
     // mis-timed move), snap it there instead of trusting the animations.
     if (p.resync && !isNew && object->tile != p.tile && object->elevation == p.elevation) {
+        if (!g_coopClientInCombat && !isInCombat() && tile_dist(object->tile, p.tile) <= 3
+            && !(g_coopParticipants[index].moveDest != -1)) {
+            // A tile or two off after a replayed walk: step there instead of hopping.
+            coopnet_log_npc_move("resync step", object, p);
+            register_clear(object);
+            register_begin(ANIMATION_REQUEST_UNRESERVED);
+            g_coopSanctionedMoveDepth++;
+            register_object_move_to_tile(object, p.tile, p.elevation, -1, 0);
+            g_coopSanctionedMoveDepth--;
+            register_end();
+            g_coopParticipants[index].moveDest = p.tile;
+            g_coopParticipants[index].moveDestStartMs = coopnet_now_ms();
+            g_coopParticipants[index].lastCommandedTile = p.tile;
+            return;
+        }
         coopnet_log_npc_move("resync snap", object, p);
         Rect syncRect;
         register_clear(object);
@@ -5774,7 +5826,7 @@ static void coopnet_apply_combat_participant(const CoopCombatParticipant& p)
             && coopnet_now_ms() - g_coopParticipants[index].moveDestStartMs > 300;
         bool arrived = object->tile == g_coopParticipants[index].moveDest || standingAgain;
         bool timedOut = coopnet_now_ms() - g_coopParticipants[index].moveDestStartMs > kCoopMoveDestTimeoutMs;
-        bool drifted = object->elevation != p.elevation || tile_dist(object->tile, p.tile) > kCoopSnapDistanceThreshold;
+        bool drifted = object->elevation != p.elevation || tile_dist(object->tile, p.tile) > snapDistance;
         if (!arrived && !timedOut && !drifted) {
             return;
         }
@@ -5828,7 +5880,7 @@ static void coopnet_apply_combat_participant(const CoopCombatParticipant& p)
     // they often teleport"). Reverted to the same large threshold as
     // everything else; accuracy while MOVING now comes from redirecting the
     // run on every update instead (below), not from snapping.
-    if (object->elevation != p.elevation || tile_dist(object->tile, p.tile) > kCoopSnapDistanceThreshold || isInCombat()) {
+    if (object->elevation != p.elevation || tile_dist(object->tile, p.tile) > snapDistance || isInCombat()) {
         coopnet_log_npc_move(isInCombat() ? "combat snap" : "far snap", object, p);
         Rect rect;
         obj_move_to_tile(object, p.tile, p.elevation, &rect);
