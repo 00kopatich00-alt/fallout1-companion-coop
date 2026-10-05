@@ -29,6 +29,10 @@ int screenGetWidth();
 int screenGetHeight();
 void handleWindowSizeChanged();
 void renderPresent();
+void svga_toggle_smooth_scaling();
+int svga_scaling_mode();
+void svga_toggle_fps_overlay();
+bool svga_fps_overlay_enabled();
 
 } // namespace fallout
 

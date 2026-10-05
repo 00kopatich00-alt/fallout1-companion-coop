@@ -90,6 +90,13 @@ int art_init()
         cacheSize = 8;
     }
 
+    // Coop: the stock 8 MB art cache runs dry with the extra mirrored critters
+    // ("Heap Warning: Could not allocate block"), and a failed art load makes a
+    // whole attack animation sequence get dropped -- shots that never happened.
+    if (cacheSize < 64) {
+        cacheSize = 64;
+    }
+
     if (!cache_init(&art_cache, art_data_size, art_data_load, art_data_free, cacheSize << 20)) {
         debug_printf("cache_init failed in art_init\n");
         return -1;

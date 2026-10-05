@@ -19,6 +19,7 @@
 #include "game/item.h"
 #include "game/lip_sync.h"
 #include "game/message.h"
+#include "game/map.h"
 #include "game/object.h"
 #include "game/perk.h"
 #include "game/proto.h"
@@ -846,6 +847,8 @@ int gDialogDisableBK()
 }
 
 // 0x43E1AC
+static int g_coopClientDialogueFocusTile = -1;
+
 int scr_dialogue_init(int headFid, int reaction)
 {
     if (dialogue_state == 1) {
@@ -877,7 +880,17 @@ int scr_dialogue_init(int headFid, int reaction)
     text_object_reset();
 
     if (PID_TYPE(dialog_target->pid) != OBJ_TYPE_ITEM) {
-        tile_scroll_to(dialog_target->tile, 2);
+        // Coop client puppet: scroll to where the host's speaker really is, not
+        // to the placeholder dialog_target (the mirrored host character).
+        int scrollTile = g_coopClientDialogueFocusTile != -1 ? g_coopClientDialogueFocusTile : dialog_target->tile;
+        tile_scroll_to(scrollTile, 2);
+        // Coop host: a conversation the client started is somewhere the host's
+        // character may not be near; the scroll stops at its limits and the picture
+        // behind the dialogue then shows unrelated ground (parked tyres). Centre on
+        // the speaker outright.
+        if (g_coopClientDialogueFocusTile == -1 && coopnet_dialogue_driven_by_client()) {
+            tile_set_center(dialog_target->tile, TILE_SET_CENTER_REFRESH_WINDOW | TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS);
+        }
     }
 
     talk_need_to_center = 1;
@@ -1477,7 +1490,7 @@ void coopnet_client_apply_head_frame(int fid, int frame)
     art_ptr_unlock(key);
 }
 
-void coopnet_client_begin_dialogue_visual(int headFid, int reaction)
+void coopnet_client_begin_dialogue_visual(int headFid, int reaction, int targetTile, int targetElevation)
 {
     if (g_coopClientDialogueVisualActive) {
         coopnet_client_end_dialogue_visual();
@@ -1510,7 +1523,16 @@ void coopnet_client_begin_dialogue_visual(int headFid, int reaction)
     // scr_dialogue_exit()'s own (equally gated) re-enable.
     gmouse_disable(0);
 
+    // Show who is being talked to: take the roof off the speaker and scroll to
+    // them BEFORE the dialogue window copies the map view into its picture.
+    g_coopClientDialogueFocusTile = -1;
+    if (hexGridTileIsValid(targetTile) && elevationIsValid(targetElevation) && targetElevation == map_elevation) {
+        obj_coop_focus_roof(targetTile, targetElevation);
+        g_coopClientDialogueFocusTile = targetTile;
+    }
+
     scr_dialogue_init(headFid, reaction);
+    g_coopClientDialogueFocusTile = -1;
     gDialogProcessInit();
 
     g_coopClientDialogueVisualActive = true;

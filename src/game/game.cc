@@ -150,6 +150,7 @@ int game_init(const char* windowTitle, bool isMapper, int font, int flags, int a
     video_options.height = 480;
     video_options.fullscreen = true;
     video_options.scale = 1;
+    video_options.nativeScale = 0;
 
     Config resolutionConfig;
     if (config_init(&resolutionConfig)) {
@@ -174,6 +175,13 @@ int game_init(const char* windowTitle, bool isMapper, int font, int flags, int a
                 video_options.scale = scaleValue + 1;
                 video_options.width /= video_options.scale;
                 video_options.height /= video_options.scale;
+            }
+
+            // NATIVE_SCALE=3 (fullscreen only): fill the whole monitor, however
+            // wide, at a game resolution of the monitor's pixels / 3.
+            int nativeScale;
+            if (config_get_value(&resolutionConfig, "MAIN", "NATIVE_SCALE", &nativeScale)) {
+                video_options.nativeScale = std::max(nativeScale, 0);
             }
         }
         config_exit(&resolutionConfig);
@@ -547,6 +555,19 @@ int game_handle_input(int eventCode, bool isInCombatMode)
     case KEY_F10:
         gsound_play_sfx_file("ib1p1xx1");
         game_quit_with_confirm();
+        break;
+    case KEY_F8: {
+        // Smooth picture scaling on/off (see svga.cc).
+        svga_toggle_smooth_scaling();
+        static const char* const kScalingNames[5] = { "blocky pixels", "smooth", "pixel-art smoothing (xBRZ)", "pixel-art smoothing + lighting", "pixel-art smoothing + lighting + richer colours" };
+        char smoothMessage[64];
+        snprintf(smoothMessage, sizeof(smoothMessage), "Graphics: %s", kScalingNames[svga_scaling_mode()]);
+        display_print(smoothMessage);
+        break;
+    }
+    case KEY_F11:
+        // FPS counter on/off (see svga.cc).
+        svga_toggle_fps_overlay();
         break;
     case KEY_F9:
         // The co-op screen: host/join, live connection status, glitch log.

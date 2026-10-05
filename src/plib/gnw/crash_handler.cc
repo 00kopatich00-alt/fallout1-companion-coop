@@ -62,6 +62,52 @@ static LONG WINAPI crash_handler_unhandled_exception_filter(EXCEPTION_POINTERS* 
     if (log != NULL) {
         fprintf(log, "\nCRASH: unhandled exception code=0x%08lX at address=%p (module=%s+0x%llX) -- minidump written to %s\n",
             code, addr, moduleName, offset, dumpPath);
+
+        if (exceptionPointers != NULL && exceptionPointers->ExceptionRecord != NULL
+            && exceptionPointers->ExceptionRecord->NumberParameters >= 2) {
+            ULONG_PTR kind = exceptionPointers->ExceptionRecord->ExceptionInformation[0];
+            fprintf(log, "  access: %s address 0x%llX\n",
+                kind == 0 ? "read" : (kind == 1 ? "write" : "execute"),
+                (unsigned long long)exceptionPointers->ExceptionRecord->ExceptionInformation[1]);
+        }
+
+        // Where the crashing thread was (module+offset per frame, resolved with
+        // the matching PDB), so a crash can be traced without the dump.
+        if (exceptionPointers != NULL && exceptionPointers->ContextRecord != NULL) {
+            CONTEXT context = *exceptionPointers->ContextRecord;
+            HANDLE process = GetCurrentProcess();
+            HANDLE thread = GetCurrentThread();
+            SymInitialize(process, NULL, TRUE);
+
+            STACKFRAME64 frame;
+            memset(&frame, 0, sizeof(frame));
+            frame.AddrPC.Offset = context.Rip;
+            frame.AddrPC.Mode = AddrModeFlat;
+            frame.AddrFrame.Offset = context.Rbp;
+            frame.AddrFrame.Mode = AddrModeFlat;
+            frame.AddrStack.Offset = context.Rsp;
+            frame.AddrStack.Mode = AddrModeFlat;
+
+            fprintf(log, "  stack (module+offset):\n");
+            for (int depth = 0; depth < 40 && frame.AddrPC.Offset != 0; depth++) {
+                char frameModule[MAX_PATH] = "unknown";
+                DWORD64 frameOffset = frame.AddrPC.Offset;
+                HMODULE module = NULL;
+                if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                        (LPCSTR)frame.AddrPC.Offset, &module)) {
+                    GetModuleFileNameA(module, frameModule, sizeof(frameModule));
+                    frameOffset = frame.AddrPC.Offset - (DWORD64)module;
+                }
+                fprintf(log, "    %s+0x%llX\n", frameModule, frameOffset);
+
+                if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, process, thread, &frame, &context, NULL,
+                        SymFunctionTableAccess64, SymGetModuleBase64, NULL)) {
+                    break;
+                }
+            }
+
+            SymCleanup(process);
+        }
         fclose(log);
     }
 

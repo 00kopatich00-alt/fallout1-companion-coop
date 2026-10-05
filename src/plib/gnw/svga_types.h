@@ -19,6 +19,10 @@ typedef struct VideoOptions {
     int height;
     bool fullscreen;
     int scale;
+    // Fullscreen only: when above 0 the game's own resolution is the monitor's
+    // real pixel size divided by this, filling the whole screen with no black
+    // bars (the picture is then shown nativeScale times larger).
+    int nativeScale;
 } VideoOptions;
 
 } // namespace fallout

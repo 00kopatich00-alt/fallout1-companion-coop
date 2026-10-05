@@ -366,7 +366,7 @@ void coopnet_notify_attack_anim(Object* attacker, int anim, Object* defender);
 // animation (hit/knockback/death) to the client whenever the object being
 // animated is the companion or obj_dude. See coopnet_notify_damage_anim()'s
 // own comment (coopnet.cc).
-void coopnet_notify_damage_anim(Object* defender, int damage, int flags, bool hitFromFront, int knockbackDistance, int knockbackRotation, int anim, Object* attacker, int delay);
+void coopnet_notify_damage_anim(Object* defender, int damage, int flags, bool hitFromFront, int knockbackDistance, int knockbackRotation, int anim, Object* attacker, int delay, Object* weapon);
 
 // Host-side only. Same idea and wire shape as coopnet_notify_attack_anim(),
 // for non-combat one-shot gestures (picking an item up, reaching to use a
@@ -508,6 +508,10 @@ void coopnet_notify_dialogue_visual_begin(int headFid, int reaction);
 void coopnet_notify_dialogue_visual_end();
 // Host: a talking-head frame was just drawn (gdialog.cc); the client draws the same.
 void coopnet_notify_head_frame(int fid, int frame);
+
+// Host: a one-off animation (a ladder climb) a mirrored character is playing now;
+// the client replays it. faceTile turns the character towards it first (-1 = no turn).
+void coopnet_notify_object_anim(Object* obj, int anim, int faceTile);
 
 // A cutscene is playing (gmovie.cc). Its own loop polls the network, and a map
 // change handled from inside it -- the host noticing a new map, the client

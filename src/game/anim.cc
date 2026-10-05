@@ -341,15 +341,18 @@ void anim_exit()
 int register_begin(int requestOptions)
 {
     if (curr_anim_set != -1) {
+        debug_printf("\nCoop-debug: register_begin refused: sequence %d is still open\n", curr_anim_set);
         return -1;
     }
 
     if (anim_in_anim_stop) {
+        debug_printf("\nCoop-debug: register_begin refused: anim_stop in progress\n");
         return -1;
     }
 
     int v1 = anim_free_slot(requestOptions);
     if (v1 == -1) {
+        debug_printf("\nCoop-debug: register_begin refused: no free slot (options=0x%x)\n", requestOptions);
         return -1;
     }
 
@@ -494,6 +497,7 @@ static int anim_preload(Object* object, int fid, CacheEntry** cacheEntryPtr)
         return 0;
     }
 
+    debug_printf("\nCoop-debug: anim_preload failed: fid=0x%x owner pid=%d\n", fid, object != NULL ? object->pid : -1);
     return -1;
 }
 
@@ -527,10 +531,12 @@ static void anim_cleanup()
 int check_registry(Object* obj)
 {
     if (curr_anim_set == -1) {
+        debug_printf("\nCoop-debug: check_registry: no sequence is open (pid=%d)\n", obj != NULL ? obj->pid : -1);
         return -1;
     }
 
     if (curr_anim_counter >= ANIMATION_DESCRIPTION_LIST_CAPACITY) {
+        debug_printf("\nCoop-debug: check_registry: sequence is full (pid=%d)\n", obj != NULL ? obj->pid : -1);
         return -1;
     }
 
@@ -546,6 +552,8 @@ int check_registry(Object* obj)
                 AnimationDescription* animationDescription = &(animationSequence->animations[animationDescriptionIndex]);
                 if (obj == animationDescription->owner && animationDescription->kind != 11) {
                     if ((animationSequence->flags & ANIM_SEQ_INSIGNIFICANT) == 0) {
+                        debug_printf("\nCoop-debug: check_registry refused pid=%d (sequence %d flags=0x%x length=%d, anim=%d kind=%d)\n",
+                            obj->pid, animationSequenceIndex, animationSequence->flags, animationSequence->length, animationDescription->anim, animationDescription->kind);
                         return -1;
                     }
 
