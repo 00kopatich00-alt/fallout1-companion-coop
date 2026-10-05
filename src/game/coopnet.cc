@@ -158,6 +158,7 @@ enum CoopMsgType : uint8_t {
     COOP_MSG_CHAR_RESTORE = 63, // host -> client, "this is how far that character got in MY world" -- the client applies it -- see CoopCharBlob
     COOP_MSG_XP = 64, // host -> client, experience the party just earned -- see CoopXp
     COOP_MSG_HEAD_FRAME = 65, // host -> client, the talking-head frame the host just drew -- see CoopHeadFrame
+    COOP_MSG_OBJ_ANIM = 66, // host -> client, a one-off animation of a mirrored character (ladder climb) -- see CoopObjAnim
 };
 
 // Experience the host's party earned (kills and quests alike). Each player keeps
@@ -173,6 +174,14 @@ struct CoopXp {
 struct CoopHeadFrame {
     int32_t fid;
     int32_t frame;
+};
+
+// Host -> client: play one animation on a mirrored character (objId as in
+// CoopMoveAnim). Used for the ladder climb, which the client otherwise never saw.
+struct CoopObjAnim {
+    int32_t objId;
+    int32_t anim;
+    int32_t faceTile;
 };
 
 // A whole character, in the game's own character-file format (stats, skills,
@@ -223,7 +232,7 @@ struct CoopSettings {
 // Bumped whenever behavior changes in a way an older exe on the other side
 // would misread -- a mismatch is now refused with a clear message (see the
 // HELLO handling) instead of producing confusing half-working sessions.
-const uint32_t kCoopProtocolVersion = 3;
+const uint32_t kCoopProtocolVersion = 4;
 
 struct CoopHello {
     uint32_t protocolVersion;
@@ -580,6 +589,12 @@ struct CoopCombatDamageAnim {
     int32_t knockbackRotation;
     int32_t anim;
     int32_t delay;
+    // What the death animation depends on besides the hit itself: the weapon's
+    // damage type (fire, plasma, electrical...) and the attacker kind. The client has
+    // neither the weapon nor always the attacker, so it replayed every death as a
+    // plain bullet death.
+    int32_t damageType;
+    int32_t attackerKind;
     uint8_t hitFromFront;
 };
 
@@ -1447,6 +1462,23 @@ static const char* coopnet_explain_connect_error(int err)
 // Message framing
 // ---------------------------------------------------------------------------
 
+// Connection health counters, logged every few seconds by coopnet_net_stats_tick().
+struct CoopNetStats {
+    uint32_t sentMsgs;
+    uint32_t sentBytes;
+    uint32_t dropped; // droppable sends skipped because the peer's socket was full
+    uint32_t failed; // sends that timed out or errored
+    uint32_t blockedMs; // time spent waiting inside send()
+    uint32_t recvMsgs;
+    uint32_t recvBytes;
+    uint32_t maxRecvGapMs; // longest wait between two received messages
+    uint32_t maxPollGapMs; // longest pause between two network polls (= game frame stall)
+    uint32_t sentByType[256];
+    uint32_t recvByType[256];
+};
+static CoopNetStats g_coopNetStats;
+static uint32_t g_coopNetStatsLastRecvMs = 0;
+
 static bool coopnet_send_message(CoopSocket sock, uint8_t type, const void* payload, uint16_t payloadLen)
 {
     if (sock == COOP_INVALID_SOCKET) {
@@ -1489,9 +1521,12 @@ static bool coopnet_send_message(CoopSocket sock, uint8_t type, const void* payl
                 // the host used to stall two seconds per message and froze.
                 // Only before the first byte, so a message is never left half-sent.
                 if (g_coopSendDroppable && sent == 0) {
+                    g_coopNetStats.dropped++;
                     return false;
                 }
                 if (coopnet_now_ms() - startMs > kCoopSendTimeoutMs) {
+                    g_coopNetStats.failed++;
+                    g_coopNetStats.blockedMs += coopnet_now_ms() - startMs;
                     coopnet_report_glitch("send() timed out (buffer never drained), dropping message type=%d\n", type);
                     return false;
                 }
@@ -1500,11 +1535,19 @@ static bool coopnet_send_message(CoopSocket sock, uint8_t type, const void* payl
                 SDL_Delay(1);
                 continue;
             }
+            g_coopNetStats.failed++;
             return false;
         }
         sent += rc;
     }
 
+    g_coopNetStats.sentMsgs++;
+    g_coopNetStats.sentBytes += total;
+    g_coopNetStats.sentByType[type]++;
+    uint32_t blocked = coopnet_now_ms() - startMs;
+    if (blocked > 1) {
+        g_coopNetStats.blockedMs += blocked;
+    }
     return true;
 }
 
@@ -1562,6 +1605,17 @@ static bool coopnet_try_recv_message(CoopSocket sock, uint8_t* outType, unsigned
     *outPayloadLen = header.length;
     if (header.length > 0) {
         memcpy(outPayload, g_coopRecvBuffer + sizeof(header), header.length);
+    }
+
+    {
+        uint32_t nowMs = coopnet_now_ms();
+        if (g_coopNetStatsLastRecvMs != 0 && nowMs - g_coopNetStatsLastRecvMs > g_coopNetStats.maxRecvGapMs) {
+            g_coopNetStats.maxRecvGapMs = nowMs - g_coopNetStatsLastRecvMs;
+        }
+        g_coopNetStatsLastRecvMs = nowMs;
+        g_coopNetStats.recvMsgs++;
+        g_coopNetStats.recvBytes += totalNeeded;
+        g_coopNetStats.recvByType[header.type]++;
     }
 
     int remaining = g_coopRecvBufferLen - totalNeeded;
@@ -2485,7 +2539,38 @@ static void coopnet_host_apply_combat_attack(int32_t targetId, int32_t targetTil
         int rc = combat_check_bad_shot(g_coopCompanion, target, hitMode, hitLocation != HIT_LOCATION_UNCALLED);
         debug_printf("\nCoop: host attack hitMode=%d hitLocation=%d check=%d\n", hitMode, hitLocation, rc);
         if (rc == COMBAT_BAD_SHOT_OK) {
-            combat_attack(g_coopCompanion, target, hitMode, hitLocation);
+            // An attack sequence is refused outright if the shooter or the target
+            // still owns any leftover sequence (check_registry) -- the shot then
+            // never happens, yet its damage animation had already been announced
+            // to the client. Drop stale leftovers of both first.
+            for (int i = 0; i < 8 && register_clear(g_coopCompanion) == 0; i++) {
+            }
+            for (int i = 0; i < 8 && register_clear(target) == 0; i++) {
+            }
+            // The shot is animated from the companion's picture (fid), which carries
+            // the weapon animation code of the hand it was last refreshed for. If the
+            // shot is made with the other hand's weapon (or the picture is stale) the
+            // pointing/firing art does not exist and the whole attack sequence is
+            // dropped ("anim_preload failed" -- a called shot that never happens).
+            {
+                Object* shotWeapon = item_hit_with(g_coopCompanion, hitMode);
+                int animationCode = 0;
+                Proto* weaponProto;
+                if (shotWeapon != NULL && proto_ptr(shotWeapon->pid, &weaponProto) != -1 && weaponProto->item.type == ITEM_TYPE_WEAPON) {
+                    animationCode = weaponProto->item.data.weapon.animationCode;
+                }
+                int wantFid = art_id(OBJ_TYPE_CRITTER, g_coopCompanion->fid & 0xFFF, FID_ANIM_TYPE(g_coopCompanion->fid), animationCode, (g_coopCompanion->fid & 0x70000000) >> 28);
+                if (wantFid != g_coopCompanion->fid && art_exists(wantFid)) {
+                    debug_printf("\nCoop: companion picture fid 0x%x -> 0x%x to match the weapon of hitMode %d\n", g_coopCompanion->fid, wantFid, hitMode);
+                    Rect fidRect;
+                    obj_change_fid(g_coopCompanion, wantFid, &fidRect);
+                    tile_refresh_rect(&fidRect, g_coopCompanion->elevation);
+                }
+            }
+            int attackRc = combat_attack(g_coopCompanion, target, hitMode, hitLocation);
+            if (attackRc == -1) {
+                debug_printf("\nCoop: host combat_attack FAILED (hitMode=%d hitLocation=%d)\n", hitMode, hitLocation);
+            }
         } else if (rc == COMBAT_BAD_SHOT_OUT_OF_RANGE) {
             coopnet_host_explain_refused_attack(rc, hitMode, hitLocation != HIT_LOCATION_UNCALLED);
             register_clear(g_coopCompanion);
@@ -2910,6 +2995,18 @@ static void coopnet_remote_host_apply_one_input()
     CoopRemoteInput in = g_coopRemoteInputQueue.front();
     g_coopRemoteInputQueue.erase(g_coopRemoteInputQueue.begin());
 
+    // Pure mouse movements with the same buttons held collapse into the newest
+    // one: only where the pointer ended up matters, and applying one per frame
+    // let a long drag fall seconds behind the client's hand (items dropped in
+    // the wrong place, or the drag seemed to need several tries). Button
+    // changes and key presses are never merged -- each keeps its own frame.
+    while (in.scancode < 0 && !g_coopRemoteInputQueue.empty()
+        && g_coopRemoteInputQueue.front().scancode < 0
+        && g_coopRemoteInputQueue.front().buttons == in.buttons) {
+        in = g_coopRemoteInputQueue.front();
+        g_coopRemoteInputQueue.erase(g_coopRemoteInputQueue.begin());
+    }
+
     int curX, curY;
     mouse_get_position(&curX, &curY);
     mouse_simulate_input(in.x - curX, in.y - curY, in.buttons);
@@ -3150,7 +3247,9 @@ static void coopnet_remote_client_tick()
     }
 
     if (mx != g_coopRemoteLastX || my != g_coopRemoteLastY || buttons != g_coopRemoteLastButtons) {
-        if (buttons != g_coopRemoteLastButtons || now - g_coopRemoteLastInputMs >= 30) {
+        // Every frame while a button is held (a drag), 10 ms otherwise: the old
+        // 30 ms spacing made a held item trail far behind the pointer.
+        if (buttons != g_coopRemoteLastButtons || buttons != 0 || now - g_coopRemoteLastInputMs >= 10) {
             g_coopRemoteLastX = mx;
             g_coopRemoteLastY = my;
             g_coopRemoteLastButtons = buttons;
@@ -3987,11 +4086,22 @@ static void coopnet_apply_scenery_state(const CoopSceneryState& state)
     coopnet_report_glitch("scenery state notification had no matching local object (pid=%d, tile=%d)\n", state.pid, state.tile);
 }
 
+// obj_destroy() leaves any animation sequence that still owns the object running;
+// the next animation tick then walks a freed object (a crash in object_move ->
+// obj_offset -> obj_node_ptr on the client when a streamed NPC mid-walk was
+// removed). Every coop-driven removal clears the object's sequences first.
+static void coopnet_destroy_object(Object* object)
+{
+    for (int i = 0; i < 8 && register_clear(object) == 0; i++) {
+    }
+    obj_destroy(object);
+}
+
 static void coopnet_apply_item_picked_up(const CoopItemEvent& evt)
 {
     for (Object* object = obj_find_first_at(evt.elevation); object != NULL; object = obj_find_next_at()) {
         if (object->tile == evt.tile && object->pid == evt.pid) {
-            obj_destroy(object);
+            coopnet_destroy_object(object);
             tile_refresh_display();
             return;
         }
@@ -5431,6 +5541,19 @@ static uint32_t g_coopClientLastRepaintMs = 0;
 static Object* g_coopParticipantStampDude = NULL;
 static int g_coopParticipantStampMap = -2;
 
+// Why a streamed NPC jumped or ran, for the "people teleport / run off screen"
+// reports: one line per event (capped), with where it was and where it went.
+static void coopnet_log_npc_move(const char* why, Object* object, const CoopCombatParticipant& p)
+{
+    static int logged = 0;
+    if (logged >= 600) {
+        return;
+    }
+    logged++;
+    debug_printf("\nCoop-npc: %s id=%d pid=%d tile %d -> %d (dist %d, elevation %d -> %d) combat=%d\n",
+        why, p.id, p.pid, object->tile, p.tile, tile_dist(object->tile, p.tile), object->elevation, p.elevation, g_coopClientInCombat ? 1 : 0);
+}
+
 static void coopnet_apply_combat_participant(const CoopCombatParticipant& p)
 {
     if ((p.pid == 0x1000000 || p.pid == kCoopCompanionPid)) {
@@ -5491,7 +5614,7 @@ static void coopnet_apply_combat_participant(const CoopCombatParticipant& p)
         // host's. The host is right: drop that corpse and mirror a living one.
         if (object != NULL && !p.isDead && p.hp > 0 && critter_is_dead(object)) {
             debug_printf("\nCoop: client copy of id=%d (pid=%d) is a corpse but the host's is alive -- replacing it\n", p.id, p.pid);
-            obj_destroy(object);
+            coopnet_destroy_object(object);
             object = NULL;
         }
 
@@ -5543,7 +5666,7 @@ static void coopnet_apply_combat_participant(const CoopCombatParticipant& p)
             g_coopParticipants[index] = g_coopParticipants[g_coopParticipantCount - 1];
             g_coopParticipantCount--;
             if (wrong != NULL && wrong != obj_dude && wrong != g_coopCompanion) {
-                obj_destroy(wrong);
+                coopnet_destroy_object(wrong);
             }
             debug_printf("\nCoop: host critter id=%d is alive but the client's copy was dead -- re-mirroring\n", p.id);
             coopnet_apply_combat_participant(p);
@@ -5617,6 +5740,7 @@ static void coopnet_apply_combat_participant(const CoopCombatParticipant& p)
     // the client's copy must be on the same tile -- if it isn't (a missed or
     // mis-timed move), snap it there instead of trusting the animations.
     if (p.resync && !isNew && object->tile != p.tile && object->elevation == p.elevation) {
+        coopnet_log_npc_move("resync snap", object, p);
         Rect syncRect;
         register_clear(object);
         obj_move_to_tile(object, p.tile, p.elevation, &syncRect);
@@ -5659,6 +5783,7 @@ static void coopnet_apply_combat_participant(const CoopCombatParticipant& p)
         if (!arrived) {
             // The replay didn't get there: stop it and put the critter where
             // the host has it.
+            coopnet_log_npc_move(drifted ? "replay drifted, snap" : (timedOut ? "replay timed out, snap" : "replay stopped, snap"), object, p);
             Rect snapRect;
             register_clear(object);
             obj_move_to_tile(object, p.tile, p.elevation, &snapRect);
@@ -5704,6 +5829,7 @@ static void coopnet_apply_combat_participant(const CoopCombatParticipant& p)
     // everything else; accuracy while MOVING now comes from redirecting the
     // run on every update instead (below), not from snapping.
     if (object->elevation != p.elevation || tile_dist(object->tile, p.tile) > kCoopSnapDistanceThreshold || isInCombat()) {
+        coopnet_log_npc_move(isInCombat() ? "combat snap" : "far snap", object, p);
         Rect rect;
         obj_move_to_tile(object, p.tile, p.elevation, &rect);
         obj_set_rotation(object, p.rotation, &rect);
@@ -5714,6 +5840,9 @@ static void coopnet_apply_combat_participant(const CoopCombatParticipant& p)
 
     if (g_coopParticipants[index].lastCommandedTile == p.tile) {
         return;
+    }
+    if (tile_dist(object->tile, p.tile) > 4) {
+        coopnet_log_npc_move("long walk/run", object, p);
     }
 
     bool hasArrived = g_coopParticipants[index].lastCommandedTile == -1 || object->tile == g_coopParticipants[index].lastCommandedTile;
@@ -5754,7 +5883,7 @@ static void coopnet_clear_combat_participants()
         // A dead spawned mirror is the corpse of something the host really
         // killed -- keep it, or bodies vanish the instant the fight ends.
         if (g_coopParticipants[i].wasSpawned && !g_coopParticipants[i].dead) {
-            obj_destroy(g_coopParticipants[i].localObject);
+            coopnet_destroy_object(g_coopParticipants[i].localObject);
         }
     }
     g_coopParticipantCount = 0;
@@ -5775,7 +5904,7 @@ static void coopnet_apply_world_remove(const CoopWorldRemove& rem)
             g_coopParticipants[i] = g_coopParticipants[g_coopParticipantCount - 1];
             g_coopParticipantCount--;
             if (object != obj_dude && object != g_coopCompanion) {
-                obj_destroy(object);
+                coopnet_destroy_object(object);
                 tile_refresh_display();
             }
             return;
@@ -5810,7 +5939,7 @@ static void coopnet_apply_world_item(const CoopWorldItem& msg)
         obj_move_to_tile(item, msg.tile, msg.elevation, &rect);
         tile_refresh_rect(&rect, msg.elevation);
     } else if (existing != NULL) {
-        obj_destroy(existing);
+        coopnet_destroy_object(existing);
         tile_refresh_display();
     }
 }
@@ -6549,14 +6678,9 @@ static void coopnet_poll_client()
                 // safe either way).
                 coopnet_close_dialogue_window();
                 gdialog_set_background(visualBegin.background);
-                coopnet_client_begin_dialogue_visual(visualBegin.headFid, visualBegin.reaction);
-
-                // Show who is being talked to: centre the camera on the
-                // speaker and take the roof off them.
-                if (hexGridTileIsValid(visualBegin.targetTile) && elevationIsValid(visualBegin.targetElevation)) {
-                    obj_coop_focus_roof(visualBegin.targetTile, visualBegin.targetElevation);
-                    tile_set_center(visualBegin.targetTile, TILE_SET_CENTER_REFRESH_WINDOW | TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS);
-                }
+                // Camera and roof are put on the speaker inside this call, before
+                // the dialogue window snapshots the map view.
+                coopnet_client_begin_dialogue_visual(visualBegin.headFid, visualBegin.reaction, visualBegin.targetTile, visualBegin.targetElevation);
             } else if (type == COOP_MSG_DIALOGUE_VISUAL_END) {
                 debug_printf("\nCoop: received DIALOGUE_VISUAL_END\n");
                 coopnet_client_end_dialogue_visual();
@@ -6653,7 +6777,9 @@ static void coopnet_poll_client()
                     coopnet_client_reset_commanded_tile_for(defender);
                     register_begin(ANIMATION_REQUEST_RESERVED);
                     register_priority(1);
+                    coop_set_damage_replay(damageAnim.damageType, damageAnim.attackerKind);
                     show_damage_to_object(defender, damageAnim.damage, damageAnim.flags, NULL, damageAnim.hitFromFront != 0, damageAnim.knockbackDistance, damageAnim.knockbackRotation, damageAnim.anim, attacker, damageAnim.delay);
+                    coop_set_damage_replay(-1, 0);
                     register_end();
                     if ((damageAnim.flags & DAM_DEAD) != 0) {
                         coopnet_client_mark_dead(defender);
@@ -6719,6 +6845,20 @@ static void coopnet_poll_client()
                 CoopHeadFrame headFrame;
                 memcpy(&headFrame, payload, sizeof(headFrame));
                 coopnet_client_apply_head_frame(headFrame.fid, headFrame.frame);
+            } else if (type == COOP_MSG_OBJ_ANIM && payloadLen == sizeof(CoopObjAnim)) {
+                CoopObjAnim objAnim;
+                memcpy(&objAnim, payload, sizeof(objAnim));
+                Object* animObj = coopnet_resolve_anim_object(objAnim.objId);
+                if (animObj != NULL && objAnim.anim > 0 && objAnim.anim < ANIM_COUNT) {
+                    register_clear(animObj);
+                    coopnet_client_reset_commanded_tile_for(animObj);
+                    register_begin(ANIMATION_REQUEST_RESERVED | ANIMATION_REQUEST_NO_STAND);
+                    if (hexGridTileIsValid(objAnim.faceTile)) {
+                        register_object_turn_towards(animObj, objAnim.faceTile);
+                    }
+                    register_object_animate(animObj, objAnim.anim, 0);
+                    register_end();
+                }
             } else if (type == COOP_MSG_XP && payloadLen == sizeof(CoopXp)) {
                 CoopXp xp;
                 memcpy(&xp, payload, sizeof(xp));
@@ -6818,8 +6958,70 @@ static void coopnet_poll_client()
     }
 }
 
+static void coopnet_net_stats_tick()
+{
+    static uint32_t lastPollMs = 0;
+    static uint32_t lastLogMs = 0;
+
+    if (g_coopConnState != CoopConnState::Connected) {
+        lastPollMs = 0;
+        lastLogMs = 0;
+        g_coopNetStatsLastRecvMs = 0;
+        return;
+    }
+
+    uint32_t now = coopnet_now_ms();
+    if (lastPollMs != 0 && now - lastPollMs > g_coopNetStats.maxPollGapMs) {
+        g_coopNetStats.maxPollGapMs = now - lastPollMs;
+    }
+    lastPollMs = now;
+
+    if (lastLogMs == 0) {
+        lastLogMs = now;
+        return;
+    }
+    if (now - lastLogMs < 5000) {
+        return;
+    }
+
+    char sentTop[160];
+    char recvTop[160];
+    sentTop[0] = '\0';
+    recvTop[0] = '\0';
+    for (int pass = 0; pass < 2; pass++) {
+        uint32_t* counts = pass == 0 ? g_coopNetStats.sentByType : g_coopNetStats.recvByType;
+        char* out = pass == 0 ? sentTop : recvTop;
+        bool used[256];
+        memset(used, 0, sizeof(used));
+        for (int n = 0; n < 4; n++) {
+            int best = -1;
+            for (int t = 0; t < 256; t++) {
+                if (!used[t] && counts[t] > 0 && (best == -1 || counts[t] > counts[best])) {
+                    best = t;
+                }
+            }
+            if (best == -1) {
+                break;
+            }
+            used[best] = true;
+            size_t len = strlen(out);
+            snprintf(out + len, 160 - len, "%s%d x%u", n == 0 ? "" : ", ", best, counts[best]);
+        }
+    }
+
+    debug_printf("\nCoop-net: %us window: sent %u msgs / %u B (dropped %u, failed %u, blocked %u ms), recv %u msgs / %u B, max recv gap %u ms, max poll gap %u ms, backlog %d B; top sent types [%s] recv types [%s]\n",
+        (unsigned)((now - lastLogMs) / 1000),
+        g_coopNetStats.sentMsgs, g_coopNetStats.sentBytes, g_coopNetStats.dropped, g_coopNetStats.failed, g_coopNetStats.blockedMs,
+        g_coopNetStats.recvMsgs, g_coopNetStats.recvBytes, g_coopNetStats.maxRecvGapMs, g_coopNetStats.maxPollGapMs,
+        g_coopRecvBufferLen, sentTop, recvTop);
+    memset(&g_coopNetStats, 0, sizeof(g_coopNetStats));
+    lastLogMs = now;
+}
+
 void coopnet_poll()
 {
+    coopnet_net_stats_tick();
+
     // A join that's still retrying has no session (role None) between attempts.
     coopnet_client_retry_tick();
 
@@ -7669,7 +7871,10 @@ void coopnet_notify_move(Object* obj, int tile, int elevation, bool run, int act
         return;
     }
 
-    int32_t objId = coopnet_resolve_anim_id(obj);
+    // Out of combat every streamed NPC's walk is announced too (a party member
+    // following the host, a wandering townsperson): chasing them with one-tile
+    // position updates made the client's copy lag, snap back and teleport.
+    int32_t objId = coopnet_resolve_anim_id(obj, !isInCombat());
     if (objId == -1) {
         return;
     }
@@ -7691,7 +7896,10 @@ void coopnet_notify_move_to_object(Object* obj, Object* destination, bool run, i
         return;
     }
 
-    int32_t objId = coopnet_resolve_anim_id(obj);
+    // Out of combat every streamed NPC's walk is announced too (a party member
+    // following the host, a wandering townsperson): chasing them with one-tile
+    // position updates made the client's copy lag, snap back and teleport.
+    int32_t objId = coopnet_resolve_anim_id(obj, !isInCombat());
     if (objId == -1) {
         return;
     }
@@ -7744,7 +7952,7 @@ void coopnet_notify_scenery_state(Object* scenery, bool isOpen)
 // animate) is the companion or obj_dude. See CoopCombatDamageAnim's
 // comment for why `weapon` is dropped and `attacker` falls back to
 // `defender` on the receiving end when it can't be resolved.
-void coopnet_notify_damage_anim(Object* defender, int damage, int flags, bool hitFromFront, int knockbackDistance, int knockbackRotation, int anim, Object* attacker, int delay)
+void coopnet_notify_damage_anim(Object* defender, int damage, int flags, bool hitFromFront, int knockbackDistance, int knockbackRotation, int anim, Object* attacker, int delay, Object* weapon)
 {
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected) {
         return;
@@ -7764,6 +7972,8 @@ void coopnet_notify_damage_anim(Object* defender, int damage, int flags, bool hi
     msg.knockbackRotation = knockbackRotation;
     msg.anim = anim;
     msg.delay = delay;
+    msg.damageType = weapon != NULL ? item_w_damage_type(weapon) : -1;
+    msg.attackerKind = coop_damage_attacker_kind(attacker);
     msg.hitFromFront = hitFromFront ? 1 : 0;
 
     bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_COMBAT_DAMAGE_ANIM, &msg, sizeof(msg));
@@ -8138,6 +8348,24 @@ void coopnet_notify_head_frame(int fid, int frame)
     msg.fid = fid;
     msg.frame = frame;
     coopnet_send_message(g_coopPeerSocket, COOP_MSG_HEAD_FRAME, &msg, sizeof(msg));
+}
+
+void coopnet_notify_object_anim(Object* obj, int anim, int faceTile)
+{
+    if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected) {
+        return;
+    }
+
+    int32_t objId = coopnet_resolve_anim_id(obj, true);
+    if (objId == -1) {
+        return;
+    }
+
+    CoopObjAnim msg;
+    msg.objId = objId;
+    msg.anim = anim;
+    msg.faceTile = faceTile;
+    coopnet_send_message(g_coopPeerSocket, COOP_MSG_OBJ_ANIM, &msg, sizeof(msg));
 }
 
 void coopnet_notify_dialogue_visual_end()

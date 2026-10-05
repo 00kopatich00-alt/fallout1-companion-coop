@@ -55,7 +55,7 @@ void barter_end_to_talk_to();
 bool coopnet_client_dialogue_visual_active();
 void coopnet_client_apply_head_frame(int fid, int frame);
 bool coopnet_client_dialogue_hover(int keyCode);
-void coopnet_client_begin_dialogue_visual(int headFid, int reaction);
+void coopnet_client_begin_dialogue_visual(int headFid, int reaction, int targetTile, int targetElevation);
 void coopnet_client_apply_dialogue_visual_state(int replyListId, int replyMsgId, const char* replyText,
     int optionCount, const int* optionListIds, const int* optionMsgIds, const int* optionReactions,
     const char* const* optionTexts);

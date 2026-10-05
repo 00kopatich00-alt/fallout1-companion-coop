@@ -4327,6 +4327,20 @@ static void draw_loc(int input, int color)
 }
 
 // 0x42382C
+// Coop client: obj_dude is the mirrored host character there; the shooter is the
+// client's own companion, and a far target just makes it walk up first, so the
+// percentages are measured from it and ignore range.
+static int called_shot_chance(Object* target, int hitLocation, int hitMode)
+{
+    if (coopnet_get_role() == CoopRole::Client) {
+        Object* companion = coopnet_get_view_companion();
+        if (companion != NULL) {
+            return determine_to_hit_no_range(companion, target, hitLocation, hitMode);
+        }
+    }
+    return determine_to_hit(obj_dude, target, hitLocation, hitMode);
+}
+
 static int get_called_shot_location(Object* critter, int* hit_location, int hit_mode)
 {
     call_target = critter;
@@ -4414,7 +4428,7 @@ static int get_called_shot_location(Object* critter, int* hit_location, int hit_
         char* hit_location_name;
         int hit_location_name_width;
 
-        probability = determine_to_hit(obj_dude, critter, hit_loc_left[index], hit_mode);
+        probability = called_shot_chance(critter, hit_loc_left[index], hit_mode);
         print_tohit(windowBuffer + CALLED_SHOT_WINDOW_WIDTH * (call_ty[index] - 86) + 33, CALLED_SHOT_WINDOW_WIDTH, probability);
 
         btn = win_register_button(call_win,
@@ -4433,7 +4447,7 @@ static int get_called_shot_location(Object* critter, int* hit_location, int hit_
         win_register_button_func(btn, draw_loc_on, draw_loc_off, NULL, NULL);
         draw_loc_off(btn, index);
 
-        probability = determine_to_hit(obj_dude, critter, hit_loc_right[index], hit_mode);
+        probability = called_shot_chance(critter, hit_loc_right[index], hit_mode);
         print_tohit(windowBuffer + CALLED_SHOT_WINDOW_WIDTH * (call_ty[index] - 86) + 373, CALLED_SHOT_WINDOW_WIDTH, probability);
 
         hit_location_name = combat_get_loc_name(critter, hit_loc_right[index]);

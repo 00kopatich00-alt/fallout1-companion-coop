@@ -261,6 +261,33 @@ static int internal_destroy(Object* a1, Object* a2)
 // TODO: Check very carefully, lots of conditions and jumps.
 //
 // 0x410810
+static int g_coopDamageTypeOverride = -1;
+static int g_coopAttackerKindOverride = 0;
+
+void coop_set_damage_replay(int damageType, int attackerKind)
+{
+    g_coopDamageTypeOverride = damageType;
+    g_coopAttackerKindOverride = attackerKind;
+}
+
+// 1 = the attacker is an explosion, 2 = electric trap, 3 = the special 0x20001F5 object.
+int coop_damage_attacker_kind(Object* attacker)
+{
+    if (attacker == NULL) {
+        return 0;
+    }
+    if (art_id(OBJ_TYPE_MISC, 10, 0, 0, 0) == attacker->fid) {
+        return 1;
+    }
+    if (attacker->pid == PROTO_ID_0x20001EB) {
+        return 2;
+    }
+    if (attacker->fid == FID_0x20001F5) {
+        return 3;
+    }
+    return 0;
+}
+
 void show_damage_to_object(Object* defender, int damage, int flags, Object* weapon, bool hit_from_front, int knockback_distance, int knockback_rotation, int a8, Object* attacker, int delay)
 {
     // Coop: this is the engine's single choke point for playing a
@@ -269,7 +296,7 @@ void show_damage_to_object(Object* defender, int damage, int flags, Object* weap
     // driven entirely by already-decided outcome data, so it's the exact
     // right place to mirror to the client. No-op unless defender is the
     // companion or obj_dude -- see coopnet_notify_damage_anim()'s comment.
-    coopnet_notify_damage_anim(defender, damage, flags, hit_from_front, knockback_distance, knockback_rotation, a8, attacker, delay);
+    coopnet_notify_damage_anim(defender, damage, flags, hit_from_front, knockback_distance, knockback_rotation, a8, attacker, delay, weapon);
 
     int anim;
     int fid;
@@ -279,14 +306,16 @@ void show_damage_to_object(Object* defender, int damage, int flags, Object* weap
     if (!critter_is_prone(defender)) {
         if ((flags & DAM_DEAD) != 0) {
             fid = art_id(OBJ_TYPE_MISC, 10, 0, 0, 0);
-            if (fid == attacker->fid) {
+            int attackerKind = g_coopAttackerKindOverride != 0 ? g_coopAttackerKindOverride : coop_damage_attacker_kind(attacker);
+            if (attackerKind == 1) {
                 anim = check_death(defender, ANIM_EXPLODED_TO_NOTHING, VIOLENCE_LEVEL_MAXIMUM_BLOOD, hit_from_front);
-            } else if (attacker->pid == PROTO_ID_0x20001EB) {
+            } else if (attackerKind == 2) {
                 anim = check_death(defender, ANIM_ELECTRIFIED_TO_NOTHING, VIOLENCE_LEVEL_MAXIMUM_BLOOD, hit_from_front);
-            } else if (attacker->fid == FID_0x20001F5) {
+            } else if (attackerKind == 3) {
                 anim = check_death(defender, a8, VIOLENCE_LEVEL_MAXIMUM_BLOOD, hit_from_front);
             } else {
-                anim = pick_death(attacker, defender, damage, item_w_damage_type(weapon), a8, hit_from_front);
+                int damageType = g_coopDamageTypeOverride >= 0 ? g_coopDamageTypeOverride : item_w_damage_type(weapon);
+                anim = pick_death(attacker, defender, damage, damageType, a8, hit_from_front);
             }
 
             if (anim != ANIM_FIRE_DANCE) {
@@ -958,6 +987,14 @@ static int is_next_to(Object* a1, Object* a2)
     return 0;
 }
 
+// Coop: runs inside the climb sequence right before the climb animation, so the
+// client replays the climb at the moment the host's character starts it.
+static int coop_ladder_climb_started(Object* climber, Object* ladder)
+{
+    coopnet_notify_object_anim(climber, ANIM_CLIMB_LADDER, ladder->tile);
+    return 0;
+}
+
 // 0x411C30
 static int action_climb_ladder(Object* a1, Object* a2)
 {
@@ -1005,6 +1042,7 @@ static int action_climb_ladder(Object* a1, Object* a2)
 
     const char* climbingSfx = gsnd_build_character_sfx_name(a1, ANIM_CLIMB_LADDER, CHARACTER_SOUND_EFFECT_UNUSED);
     register_object_play_sfx(a1, climbingSfx, -1);
+    register_object_must_call(a1, a2, (AnimationCallback*)coop_ladder_climb_started, -1);
     register_object_animate(a1, ANIM_CLIMB_LADDER, 0);
     register_object_call(a1, a2, (AnimationCallback*)obj_use, -1);
 

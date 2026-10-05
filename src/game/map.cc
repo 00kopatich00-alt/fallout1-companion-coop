@@ -280,7 +280,14 @@ int iso_init()
     // NOTE: Uninline.
     square_init();
 
-    display_win = win_add(0, 0, screenGetWidth(), screenGetHeight() - INTERFACE_BAR_HEIGHT, 256, 10);
+    // On a screen wider than the interface bar (which is a fixed 640 pixels and
+    // sits in the middle) the map continues behind the bar's height, so the
+    // strips left and right of the bar show the map instead of black. At 640
+    // wide there is nothing beside the bar and the map stops above it as before.
+    int displayHeight = screenGetWidth() > INTERFACE_BAR_WIDTH
+        ? screenGetHeight()
+        : screenGetHeight() - INTERFACE_BAR_HEIGHT;
+    display_win = win_add(0, 0, screenGetWidth(), displayHeight, 256, 10);
     if (display_win == -1) {
         debug_printf("win_add failed in iso_init\n");
         return -1;

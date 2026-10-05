@@ -15,6 +15,12 @@ void switch_dude();
 int action_knockback(Object* obj, int* anim, int maxDistance, int rotation, int delay);
 int action_blood(Object* obj, int anim, int delay);
 void show_damage_to_object(Object* a1, int damage, int flags, Object* weapon, bool isFallingBack, int knockbackDistance, int knockbackRotation, int a8, Object* a9, int a10);
+
+// Coop client: the weapon and attacker of a mirrored hit are not objects on this side;
+// these carry what the death animation choice needs (damage type, kind of attacker: 1 explosion,
+// 2 electric, 3 special). damageType -1 / kind 0 = use the real weapon and attacker.
+void coop_set_damage_replay(int damageType, int attackerKind);
+int coop_damage_attacker_kind(Object* attacker);
 int show_damage_target(Attack* attack);
 int show_damage_extras(Attack* attack);
 void show_damage(Attack* attack, int a2, int a3);
