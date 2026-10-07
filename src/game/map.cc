@@ -863,6 +863,7 @@ void map_new_map()
 int map_load(char* file_name)
 {
     CoopMapLoadScope coopScope;
+    coopnet_note_map_load_begin();
     int rc;
     DB_FILE* stream;
     char* extension;

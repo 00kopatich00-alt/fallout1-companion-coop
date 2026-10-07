@@ -14,6 +14,7 @@
 #include <stddef.h>
 
 #include "game/amutex.h"
+#include "plib/gnw/crash_handler.h"
 #include "game/art.h"
 #include "game/coopnet.h"
 #include "game/credits.h"
@@ -95,15 +96,23 @@ static bool main_death_voiceover_done;
 int gnw_main(int argc, char** argv)
 {
     if (!autorun_mutex_create()) {
+        startup_fail("Fallout seems to be running already (or its launcher is open).\n\n"
+                     "Close it first: press Ctrl+Shift+Esc, find fallout-ce.exe (or falloutw.exe) in the list, "
+                     "choose End task, then start the game again.");
         return 1;
     }
 
+    startup_log("stage: initialising the game");
     if (!main_init_system(argc, argv)) {
+        startup_fail("The game could not start. The most common reason is that fallout-ce.exe is not in your "
+                     "Fallout 1 folder: it must sit next to MASTER.DAT and CRITTER.DAT.");
         return 1;
     }
+    startup_log("stage: game initialised, playing the intro movies");
 
     gmovie_play(MOVIE_IPLOGO, GAME_MOVIE_FADE_IN);
     gmovie_play(MOVIE_INTRO, 0);
+    startup_log("stage: reached the main menu");
 
     if (main_menu_create() == 0) {
         int language_filter = 1;

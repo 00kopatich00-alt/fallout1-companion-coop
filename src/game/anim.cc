@@ -458,6 +458,32 @@ int register_clear(Object* a1)
     return -1;
 }
 
+// Coop client: like register_clear(), but also ends sequences marked prioritized
+// (a mirrored gesture or attack). A prioritized sequence that never finishes made
+// register_clear() answer -2 and every replayed walk of that character then failed
+// silently -- the client's own character stood still until the host's position
+// snapped it across the map. Returns the number of sequences ended.
+int register_clear_forced(Object* a1)
+{
+    int ended = 0;
+    for (int animationSequenceIndex = 0; animationSequenceIndex < ANIMATION_SEQUENCE_LIST_CAPACITY; animationSequenceIndex++) {
+        AnimationSequence* animationSequence = &(anim_set[animationSequenceIndex]);
+        if (animationSequence->field_0 == -1000 || animationSequenceIndex == curr_anim_set) {
+            continue;
+        }
+
+        for (int animationDescriptionIndex = 0; animationDescriptionIndex < animationSequence->length; animationDescriptionIndex++) {
+            AnimationDescription* animationDescription = &(animationSequence->animations[animationDescriptionIndex]);
+            if (a1 == animationDescription->owner && animationDescription->kind != 11) {
+                anim_set_end(animationSequenceIndex);
+                ended++;
+                break;
+            }
+        }
+    }
+    return ended;
+}
+
 // 0x413788
 int register_end()
 {

@@ -1,4 +1,5 @@
 #include "game/game.h"
+#include "plib/gnw/crash_handler.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -135,20 +136,26 @@ int game_init(const char* windowTitle, bool isMapper, int font, int flags, int a
     }
 
     gconfig_init(isMapper, argc, argv);
+    startup_log("stage: fallout.cfg read");
 
     game_in_mapper = isMapper;
 
     if (game_init_databases() == -1) {
+        startup_log("FAILED: could not open MASTER.DAT / CRITTER.DAT");
         gconfig_exit(false);
         return -1;
     }
+    startup_log("stage: MASTER.DAT and CRITTER.DAT opened");
 
     win_set_minimized_title(windowTitle);
 
     VideoOptions video_options;
     video_options.width = 640;
     video_options.height = 480;
-    video_options.fullscreen = true;
+    // Without an f1_res.ini the mod now opens a normal window (not fullscreen): it
+    // can be switched away from, works with several monitors and virtual machines,
+    // and a wrong video mode can never leave a player staring at a black screen.
+    video_options.fullscreen = false;
     video_options.scale = 1;
     video_options.nativeScale = 0;
 
@@ -187,7 +194,9 @@ int game_init(const char* windowTitle, bool isMapper, int font, int flags, int a
         config_exit(&resolutionConfig);
     }
 
+    startup_log("stage: opening the window (%dx%d, scale %d, fullscreen %d)", video_options.width, video_options.height, video_options.scale, video_options.fullscreen ? 1 : 0);
     initWindow(&video_options, flags);
+    startup_log("stage: window and renderer created");
     palette_init();
 
     if (!game_in_mapper) {
@@ -224,6 +233,7 @@ int game_init(const char* windowTitle, bool isMapper, int font, int flags, int a
     }
 
     debug_printf(">gsound_init\t");
+    startup_log("stage: sound started");
 
     initMovie();
     debug_printf(">initMovie\t\t");
@@ -248,6 +258,7 @@ int game_init(const char* windowTitle, bool isMapper, int font, int flags, int a
     }
 
     debug_printf(">iso_init\t");
+    startup_log("stage: map view ready");
 
     if (gmouse_init() != 0) {
         debug_printf("Failed on gmouse_init\n");

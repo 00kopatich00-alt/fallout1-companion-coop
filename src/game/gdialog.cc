@@ -31,6 +31,8 @@
 #include "game/textobj.h"
 #include "game/tile.h"
 #include "int/dialog.h"
+#include "int/intrpret.h"
+#include "game/scripts.h"
 #include "int/window.h"
 #include "platform_compat.h"
 #include "plib/color/color.h"
@@ -702,6 +704,23 @@ void gdialog_enter(Object* target, int a2)
     coopnet_notify_dialogue_begin();
 
     if (target->sid != -1) {
+        // Coop: exec_script_proc() silently does nothing when the script's program is
+        // flagged exited/stopped/waiting (flags 0x124). An NPC whose script ended up
+        // in such a state answers every later Talk with nothing ("npcs don't want to
+        // talk again"). Log the state, and drop a wait flag that has no child script
+        // behind it (nothing could ever clear it).
+        Script* talkScript;
+        if (coopnet_get_role() != CoopRole::None && scr_ptr(target->sid, &talkScript) != -1 && talkScript->program != NULL) {
+            Program* talkProgram = talkScript->program;
+            if ((talkProgram->flags & 0x0124) != 0) {
+                debug_printf("\nCoop: talk script of pid=%d (idx %d) is blocked: program flags=0x%x exited=%d child=%p scr_flags=0x%x\n",
+                    target->pid, talkScript->scr_script_idx, talkProgram->flags, talkProgram->exited ? 1 : 0, (void*)talkProgram->child, talkScript->scr_flags);
+                if (talkProgram->child == NULL && (talkProgram->flags & 0x0120) != 0 && !talkProgram->exited && (talkProgram->flags & 0x01) == 0) {
+                    talkProgram->flags &= ~0x0120;
+                    debug_printf("\nCoop: cleared the stuck wait flags, now 0x%x\n", talkProgram->flags);
+                }
+            }
+        }
         exec_script_proc(target->sid, SCRIPT_PROC_TALK);
     }
 
@@ -718,8 +737,12 @@ void gdialog_enter(Object* target, int a2)
     if (script->scriptOverrides || dialogue_state != 4) {
         // Not a glitch: plenty of NPCs and signs answer a Talk click with just a
         // floating line (or nothing) instead of opening a dialogue. Debug log only.
-        debug_printf("\nCoop: conversation with NPC pid=%d never opened (scriptOverrides=%d dialogue_state=%d clientDriven=%d scriptIdx=%d)\n",
-            target->pid, script->scriptOverrides ? 1 : 0, dialogue_state, coopnet_dialogue_driven_by_client() ? 1 : 0, script->scr_script_idx);
+        debug_printf("\nCoop: conversation with NPC pid=%d never opened (scriptOverrides=%d dialogue_state=%d clientDriven=%d scriptIdx=%d) distToDude=%d npcTile=%d dudeTile=%d uiDisabled=%d\n",
+            target->pid, script->scriptOverrides ? 1 : 0, dialogue_state, coopnet_dialogue_driven_by_client() ? 1 : 0, script->scr_script_idx,
+            tile_dist(obj_dude->tile, target->tile), target->tile, obj_dude->tile, game_ui_is_disabled() ? 1 : 0);
+        if (script->program != NULL) {
+            debug_printf("Coop: ... its program flags=0x%x exited=%d scr_flags=0x%x\n", script->program->flags, script->program->exited ? 1 : 0, script->scr_flags);
+        }
         dialogue_just_started = 0;
         map_enable_bk_processes();
         scr_exec_map_update_scripts();
@@ -922,7 +945,7 @@ int scr_dialogue_init(int headFid, int reaction)
     // is, possibly inside a building the host's own character isn't in -- take
     // the roof off the speaker so the head-less "who am I talking to" view
     // actually shows them (see obj_coop_focus_roof()'s comment).
-    if (dialog_target != NULL && coopnet_dialogue_driven_by_client()) {
+    if (dialog_target != NULL && coopnet_get_role() == CoopRole::Host) {
         obj_coop_focus_roof(dialog_target->tile, dialog_target->elevation);
     }
 
@@ -1532,6 +1555,9 @@ void coopnet_client_begin_dialogue_visual(int headFid, int reaction, int targetT
     }
 
     scr_dialogue_init(headFid, reaction);
+    if (g_coopClientDialogueFocusTile != -1) {
+        tile_set_center(g_coopClientDialogueFocusTile, TILE_SET_CENTER_REFRESH_WINDOW | TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS);
+    }
     g_coopClientDialogueFocusTile = -1;
     gDialogProcessInit();
 

@@ -21,6 +21,8 @@ int roll_check(int difficulty, int criticalSuccessModifier, int* howMuchPtr);
 int roll_check_critical(int delta, int criticalSuccessModifier);
 int roll_random(int min, int max);
 void roll_set_seed(int seed);
+void roll_get_state(int* state); // 34 values
+void roll_set_state(const int* state);
 
 } // namespace fallout
 

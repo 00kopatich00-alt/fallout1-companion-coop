@@ -155,6 +155,26 @@ static void init_random()
     seed_generator(random_seed());
 }
 
+// Coop: the generator's complete state (34 values), so the client can replay the
+// host's random choices while loading the same map.
+void roll_get_state(int* state)
+{
+    state[0] = iy;
+    state[1] = idum;
+    for (int index = 0; index < 32; index++) {
+        state[2 + index] = iv[index];
+    }
+}
+
+void roll_set_state(const int* state)
+{
+    iy = state[0];
+    idum = state[1];
+    for (int index = 0; index < 32; index++) {
+        iv[index] = state[2 + index];
+    }
+}
+
 // 0x4915B0
 void roll_set_seed(int seed)
 {

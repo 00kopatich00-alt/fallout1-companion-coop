@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "game/anim.h"
 #include "game/combat.h"
@@ -2028,6 +2029,18 @@ static int gsound_speech_start()
 }
 
 // 0x449B34
+static bool gsound_dir_exists(const char* path)
+{
+    char trimmed[260];
+    snprintf(trimmed, sizeof(trimmed), "%s", path);
+    size_t n = strlen(trimmed);
+    while (n > 0 && (trimmed[n - 1] == '\\' || trimmed[n - 1] == '/')) {
+        trimmed[--n] = '\0';
+    }
+    struct stat info;
+    return n > 0 && stat(trimmed, &info) == 0 && (info.st_mode & S_IFDIR) != 0;
+}
+
 static int gsound_get_music_path(char** out_value, const char* key)
 {
     int len;
@@ -2035,6 +2048,16 @@ static int gsound_get_music_path(char** out_value, const char* key)
     char* value;
 
     config_get_string(&game_config, GAME_CONFIG_SOUND_KEY, key, out_value);
+
+    // Without a fallout.cfg the built-in default is "sound\\music\\", but Steam and GOG
+    // keep the music in "data\\sound\\music\\": the game then ran with no music at all
+    // (a fresh copy of the mod in an empty folder was silent). If the configured
+    // folder is missing and the usual one is there, use that.
+    if (!gsound_dir_exists(*out_value) && gsound_dir_exists("data\\sound\\music")) {
+        debug_printf("\nMusic folder '%s' not found, using data\\sound\\music\\\n", *out_value);
+        config_set_string(&game_config, GAME_CONFIG_SOUND_KEY, key, "data\\sound\\music\\");
+        config_get_string(&game_config, GAME_CONFIG_SOUND_KEY, key, out_value);
+    }
 
     value = *out_value;
     len = strlen(value);
