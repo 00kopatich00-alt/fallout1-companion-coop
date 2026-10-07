@@ -1,3 +1,4 @@
+#include "plib/gnw/crash_handler.h"
 #include "plib/gnw/svga.h"
 
 #include <stdio.h>
@@ -29,6 +30,7 @@ namespace fallout {
 // True when the filters run on the graphics card (see gpu_fx.h). Otherwise the
 // processor version below is used.
 static bool gGpuReady = false;
+static int gGpuGuardFrames = -1;   // steady frames drawn since the filters started
 
 // FPS counter (F11): frames the game presented in the last second, the filter
 // mode, where it runs, and the game's memory.
@@ -237,6 +239,7 @@ bool svga_init(VideoOptions* video_options)
     }
 
     if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
+        startup_log("FAILED: SDL video start-up: %s", SDL_GetError());
         return false;
     }
 
@@ -253,6 +256,7 @@ bool svga_init(VideoOptions* video_options)
         video_options->height * video_options->scale,
         windowFlags);
     if (gSdlWindow == NULL) {
+        startup_log("FAILED: could not create the window: %s", SDL_GetError());
         return false;
     }
 
@@ -295,6 +299,7 @@ bool svga_init(VideoOptions* video_options)
     }
 
     if (!createRenderer(video_options->width, video_options->height)) {
+        startup_log("FAILED: could not create the renderer: %s", SDL_GetError());
         destroyRenderer();
 
         SDL_DestroyWindow(gSdlWindow);
@@ -312,10 +317,12 @@ bool svga_init(VideoOptions* video_options)
         0,
         0);
     if (gSdlSurface == NULL) {
+        startup_log("FAILED: could not create the game surface (%s)", SDL_GetError());
         destroyRenderer();
 
         SDL_DestroyWindow(gSdlWindow);
         gSdlWindow = NULL;
+        return false;
     }
 
     SDL_Color colors[256];
@@ -423,7 +430,52 @@ static bool createRenderer(int width, int height)
     // The same filters as shaders on the graphics card; the processor version
     // stays as the fallback when that is not possible.
     char gpuError[400];
-    gGpuReady = gpufx::init(width, height, gpuError, sizeof(gpuError));
+    gpuError[0] = '\0';
+    bool gpuAllowed = true;
+    {
+        // gpu_guard.txt is written just before the graphics-card filters start and
+        // deleted once the picture has run steadily for a few seconds. If it is still
+        // there, the previous start died in between (a graphics driver that does not
+        // cope): leave the filters off. Delete the file, or create no_gpu_filters.txt,
+        // to choose by hand.
+        FILE* guard = fopen("gpu_guard.txt", "r");
+        FILE* off = fopen("no_gpu_filters.txt", "r");
+        if (guard != NULL || off != NULL) {
+            gpuAllowed = false;
+            snprintf(gpuError, sizeof(gpuError), "%s", off != NULL ? "no_gpu_filters.txt is present" : "the previous start did not finish setting them up (gpu_guard.txt)");
+        }
+        if (guard != NULL) {
+            fclose(guard);
+        }
+        if (off != NULL) {
+            fclose(off);
+        }
+    }
+    if (gpuAllowed) {
+        FILE* guard = fopen("gpu_guard.txt", "w");
+        if (guard != NULL) {
+            fputs("GPU filters were starting when this file was written.\n", guard);
+            fclose(guard);
+        }
+        gGpuReady = gpufx::init(width, height, gpuError, sizeof(gpuError));
+        gGpuGuardFrames = 0;
+        if (!gGpuReady) {
+            remove("gpu_guard.txt");   // they simply are not available: not a crash
+        }
+    } else {
+        gGpuReady = false;
+    }
+    startup_log("stage: graphics-card filters %s%s%s", gGpuReady ? "ready" : "OFF", gGpuReady ? "" : " - ", gGpuReady ? "" : gpuError);
+    if (!gGpuReady && gScalingMode >= 2) {
+        // The processor version of the filters is slow on weak machines: start plain
+        // unless the player has chosen a mode before (smooth_scaling.txt).
+        FILE* chosen = fopen(kSmoothScalingFile, "r");
+        if (chosen == NULL) {
+            gScalingMode = 1;
+        } else {
+            fclose(chosen);
+        }
+    }
     FILE* infoFile = fopen("video_info.txt", "a");
     if (infoFile != NULL) {
         fprintf(infoFile, "OpenGL: %s\n", gpufx::driverInfo());
@@ -642,6 +694,11 @@ void renderPresent()
     coopnet_remote_screen_frame_hook();
 
     fpsFrame();
+
+    if (gGpuGuardFrames >= 0 && ++gGpuGuardFrames >= 240) {
+        gGpuGuardFrames = -1;
+        remove("gpu_guard.txt");
+    }
 
     // The filters on the graphics card: the game's picture goes over as it is
     // and everything else happens there.

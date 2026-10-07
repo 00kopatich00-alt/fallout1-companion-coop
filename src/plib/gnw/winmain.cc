@@ -46,6 +46,12 @@ int main(int argc, char* argv[])
     if (!coopnet_allow_multiple_instances()) {
         GNW95_mutex = CreateMutexA(0, TRUE, "GNW95MUTEX");
         if (GetLastError() != ERROR_SUCCESS) {
+            // Used to quit here without a word -- "I click Join.bat and nothing
+            // happens". Another copy of Fallout (this mod or the original game, even
+            // one hidden in the background or still closing) holds the same name.
+            startup_fail("Fallout seems to be running already (or is still closing).\n\n"
+                         "Close it first: press Ctrl+Shift+Esc, find fallout-ce.exe (or falloutw.exe) "
+                         "in the list, choose End task, then start the game again.");
             return 0;
         }
     }

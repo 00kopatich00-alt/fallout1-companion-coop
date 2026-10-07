@@ -1,5 +1,9 @@
 #include "plib/gnw/crash_handler.h"
 
+#include <cstdarg>
+#include <cstdio>
+#include <ctime>
+
 #if _WIN32
 
 #include <windows.h>
@@ -13,6 +17,40 @@
 #pragma comment(lib, "dbghelp.lib")
 
 namespace fallout {
+
+void startup_log(const char* format, ...)
+{
+    static bool first = true;
+    FILE* file = fopen("startup.log", first ? "wt" : "at");
+    first = false;
+    if (file == NULL) {
+        return;
+    }
+    time_t now = time(NULL);
+    struct tm* local = localtime(&now);
+    char stamp[32] = "";
+    if (local != NULL) {
+        strftime(stamp, sizeof(stamp), "%H:%M:%S", local);
+    }
+    fprintf(file, "[%s] ", stamp);
+    va_list args;
+    va_start(args, format);
+    vfprintf(file, format, args);
+    va_end(args);
+    fputc('\n', file);
+    fclose(file);
+}
+
+// A failure the player must be told about. Used where the game used to just quit.
+void startup_fail(const char* reason)
+{
+    startup_log("FAILED: %s", reason);
+    char message[1024];
+    snprintf(message, sizeof(message),
+        "%s\n\nIf this keeps happening, please send the file startup.log (in the game's folder) to the mod author.",
+        reason);
+    MessageBoxA(NULL, message, "Fallout Coop", MB_OK | MB_ICONERROR);
+}
 
 static LONG WINAPI crash_handler_unhandled_exception_filter(EXCEPTION_POINTERS* exceptionPointers)
 {
@@ -253,8 +291,63 @@ static DWORD WINAPI crash_handler_watchdog(LPVOID)
     return 0;
 }
 
+static bool startup_file_exists(const char* path)
+{
+    DWORD attributes = GetFileAttributesA(path);
+    return attributes != INVALID_FILE_ATTRIBUTES;
+}
+
+typedef LONG(WINAPI* RtlGetVersionFn)(OSVERSIONINFOW*);
+
+static void startup_log_environment()
+{
+    char exePath[MAX_PATH] = "?";
+    GetModuleFileNameA(NULL, exePath, sizeof(exePath));
+    char cwd[MAX_PATH] = "?";
+    GetCurrentDirectoryA(sizeof(cwd), cwd);
+    startup_log("build %s %s", __DATE__, __TIME__);
+    startup_log("exe: %s", exePath);
+    startup_log("folder: %s", cwd);
+    startup_log("command line: %s", GetCommandLineA());
+
+    OSVERSIONINFOW version;
+    memset(&version, 0, sizeof(version));
+    version.dwOSVersionInfoSize = sizeof(version);
+    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    RtlGetVersionFn getVersion = ntdll != NULL ? reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion")) : NULL;
+    if (getVersion != NULL && getVersion(&version) == 0) {
+        startup_log("windows %lu.%lu build %lu", version.dwMajorVersion, version.dwMinorVersion, version.dwBuildNumber);
+    }
+
+    MEMORYSTATUSEX memory;
+    memset(&memory, 0, sizeof(memory));
+    memory.dwLength = sizeof(memory);
+    if (GlobalMemoryStatusEx(&memory)) {
+        startup_log("memory: %llu MB total, %llu MB free", memory.ullTotalPhys / (1024 * 1024), memory.ullAvailPhys / (1024 * 1024));
+    }
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    startup_log("processors: %lu", info.dwNumberOfProcessors);
+
+    // Which game files are here? A missing MASTER.DAT / CRITTER.DAT is the most
+    // common reason a copy of the mod "does nothing".
+    const char* files[] = { "MASTER.DAT", "CRITTER.DAT", "fallout.cfg", "f1_res.ini", "smooth_scaling.txt", "DATA", "SAVEGAME" };
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+        startup_log("file %-18s %s", files[i], startup_file_exists(files[i]) ? "present" : "MISSING");
+    }
+
+    // Another copy of the game running makes this one quit at once (see winmain.cc).
+    HANDLE probe = OpenMutexA(SYNCHRONIZE, FALSE, "GNW95MUTEX");
+    if (probe != NULL) {
+        startup_log("WARNING: another game window already holds GNW95MUTEX");
+        CloseHandle(probe);
+    }
+}
+
 void crash_handler_install()
 {
+    startup_log("---- starting ----");
+    startup_log_environment();
     SetUnhandledExceptionFilter(crash_handler_unhandled_exception_filter);
 
     g_mainThreadId = GetCurrentThreadId();
@@ -272,6 +365,16 @@ namespace fallout {
 
 void crash_handler_install()
 {
+}
+
+void startup_log(const char* format, ...)
+{
+    (void)format;
+}
+
+void startup_fail(const char* reason)
+{
+    fprintf(stderr, "%s\n", reason);
 }
 
 } // namespace fallout

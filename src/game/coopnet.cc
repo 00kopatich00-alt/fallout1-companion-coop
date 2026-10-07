@@ -31,6 +31,12 @@ typedef int CoopSocket;
 #define COOP_INVALID_SOCKET (-1)
 #endif
 
+#ifdef _WIN32
+#include <windows.h>
+#include <psapi.h>
+#pragma comment(lib, "psapi.lib")
+#endif
+
 #include "game/actions.h"
 #include "game/anim.h"
 #include "game/art.h"
@@ -232,7 +238,7 @@ struct CoopSettings {
 // Bumped whenever behavior changes in a way an older exe on the other side
 // would misread -- a mismatch is now refused with a clear message (see the
 // HELLO handling) instead of producing confusing half-working sessions.
-const uint32_t kCoopProtocolVersion = 4;
+const uint32_t kCoopProtocolVersion = 5;
 
 struct CoopHello {
     uint32_t protocolVersion;
@@ -448,7 +454,13 @@ struct CoopMapTransition {
     // this case -- the map is already loaded, only the elevation/position
     // need to move.
     uint8_t sameMapElevationOnly;
+    // The host's random generator as the map load began (see roll_get_state()), so
+    // the client's load of a random encounter map makes the same random choices.
+    uint8_t rngValid;
+    int32_t rng[34];
 };
+
+static void coopnet_fill_transition_rng(CoopMapTransition& transition);
 
 // Host -> client: a read-only mirror of the host's current dialogue screen
 // -- the client can never initiate or affect dialogue itself (see
@@ -2907,6 +2919,17 @@ static void coopnet_remote_host_tick()
     int w = s->w;
     int h = s->h;
 
+    // The host's pointer is drawn into the picture it streams, so the client saw
+    // that copy of it, a round trip behind its own hand -- "the arrow is slightly
+    // off". Take it out for the moment the picture is read (hiding repaints what is
+    // under it) and put it back right after; the client draws its own pointer on top.
+    // It must not stay hidden: mouse_simulate_input() ignores input while hidden.
+    bool pointerHiddenHere = false;
+    if (!g_coopRemoteViewOnly && !mouse_hidden()) {
+        mouse_hide();
+        pointerHiddenHere = true;
+    }
+
     // A burst of hundreds of ~1KB tiles can overflow the socket buffer, and
     // coopnet_send_message() DROPS a message it can't get out in time -- a
     // dropped tile then stays wrong on the client for good if the shadow was
@@ -2969,6 +2992,10 @@ static void coopnet_remote_host_tick()
 
     g_coopSendDroppable = false;
     (void)anyLeft;
+
+    if (pointerHiddenHere) {
+        mouse_show();
+    }
 }
 
 // Host: apply the driver's forwarded input. Mouse is absolute, the engine wants
@@ -3042,6 +3069,14 @@ static void coopnet_remote_host_apply_one_input()
     mouse_simulate_input(in.x - curX, in.y - curY, in.buttons);
     if ((in.buttons & ~g_coopRemoteAppliedButtons) != 0) {
         g_coopRemoteDownMs = coopnet_now_ms();
+    }
+    if (in.buttons != g_coopRemoteAppliedButtons) {
+        static int buttonLogCount = 0;
+        if (buttonLogCount++ < 400) {
+            debug_printf("\nCoop-input: buttons %d -> %d at (%d,%d), queue left %d, hold %u ms\n",
+                g_coopRemoteAppliedButtons, in.buttons, in.x, in.y, static_cast<int>(g_coopRemoteInputQueue.size()),
+                (in.buttons == 0) ? coopnet_now_ms() - g_coopRemoteDownMs : 0u);
+        }
     }
     g_coopRemoteAppliedButtons = in.buttons;
 
@@ -3230,6 +3265,37 @@ static void coopnet_remote_client_tick()
 
     if (g_coopRemoteClientViewOnly) {
         return; // watching: nothing is forwarded
+    }
+
+    // Our own pointer, at our own hand's position (the host's picture has none).
+    {
+        unsigned char* shape;
+        int shapeW, shapeH, shapeFull, hotX, hotY;
+        char trans;
+        mouse_get_shape(&shape, &shapeW, &shapeH, &shapeFull, &hotX, &hotY, &trans);
+        SDL_Palette* palette = gSdlSurface != NULL ? gSdlSurface->format->palette : NULL;
+        if (shape != NULL && palette != NULL && gSdlTextureSurface->format->BytesPerPixel == 4) {
+            int pointerX, pointerY;
+            mouse_get_position(&pointerX, &pointerY);
+            int left = pointerX - hotX;
+            int top = pointerY - hotY;
+            for (int row = 0; row < shapeH; row++) {
+                int y = top + row;
+                if (y < 0 || y >= gSdlTextureSurface->h) {
+                    continue;
+                }
+                Uint32* line = reinterpret_cast<Uint32*>(static_cast<uint8_t*>(gSdlTextureSurface->pixels) + y * gSdlTextureSurface->pitch);
+                for (int col = 0; col < shapeW; col++) {
+                    int x = left + col;
+                    unsigned char index = shape[row * shapeFull + col];
+                    if (x < 0 || x >= gSdlTextureSurface->w || index == static_cast<unsigned char>(trans)) {
+                        continue;
+                    }
+                    const SDL_Color& color = palette->colors[index];
+                    line[x] = SDL_MapRGB(gSdlTextureSurface->format, color.r, color.g, color.b);
+                }
+            }
+        }
     }
 
     // Forward input: mouse position/buttons when they change, plus key edges.
@@ -3985,6 +4051,7 @@ static void coopnet_host_check_map_transition()
     transition.elevation = obj_dude->elevation;
     transition.rotation = obj_dude->rotation;
     transition.sameMapElevationOnly = mapChanged ? 0 : 1;
+    coopnet_fill_transition_rng(transition);
 
     bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_MAP_TRANSITION, &transition, sizeof(transition));
     debug_printf("\nCoop: sent MAP_TRANSITION to %.16s (tile=%d elevation=%d sameMapElevationOnly=%d) success=%d\n",
@@ -4118,6 +4185,29 @@ static void coopnet_apply_scenery_state(const CoopSceneryState& state)
     }
 
     coopnet_report_glitch("scenery state notification had no matching local object (pid=%d, tile=%d)\n", state.pid, state.tile);
+}
+
+static int32_t g_coopMapLoadRng[34];
+static bool g_coopMapLoadRngValid = false;
+
+void coopnet_note_map_load_begin()
+{
+    if (g_coopRole == CoopRole::Host) {
+        int state[34];
+        roll_get_state(state);
+        for (int i = 0; i < 34; i++) {
+            g_coopMapLoadRng[i] = state[i];
+        }
+        g_coopMapLoadRngValid = true;
+    }
+}
+
+static void coopnet_fill_transition_rng(CoopMapTransition& transition)
+{
+    transition.rngValid = g_coopMapLoadRngValid ? 1 : 0;
+    for (int i = 0; i < 34; i++) {
+        transition.rng[i] = g_coopMapLoadRng[i];
+    }
 }
 
 // obj_destroy() leaves any animation sequence that still owns the object running;
@@ -4934,6 +5024,7 @@ static void coopnet_poll_host()
                     sync.elevation = obj_dude->elevation;
                     sync.rotation = obj_dude->rotation;
                     sync.sameMapElevationOnly = 0;
+                    coopnet_fill_transition_rng(sync);
                     g_coopGvarShadowValid = false;
                     coopnet_host_reset_world_shadow();
                     bool syncSent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_MAP_TRANSITION, &sync, sizeof(sync));
@@ -5307,7 +5398,7 @@ static void coopnet_client_apply_position(const CoopPosition& pos)
             if (!arrived) {
                 g_coopLastCommandedTile[pos.which] = -1;
                 if (timedOut || drifted) {
-                    register_clear(target);
+                    register_clear_forced(target);
                     Rect snapRect;
                     obj_move_to_tile(target, pos.tile, pos.elevation, &snapRect);
                     obj_set_rotation(target, pos.rotation, &snapRect);
@@ -5361,7 +5452,7 @@ static void coopnet_client_apply_position(const CoopPosition& pos)
         return;
     }
 
-    register_clear(target);
+    register_clear_forced(target);
     g_coopSanctionedMoveDepth++;
     register_begin(ANIMATION_REQUEST_UNRESERVED);
     register_object_run_to_tile(target, pos.tile, pos.elevation, -1, 0);
@@ -5510,7 +5601,7 @@ static void coopnet_client_mark_dead(Object* obj)
 // animation message never arrived.
 static void coopnet_client_play_death(Object* obj, bool markDead)
 {
-    register_clear(obj);
+    register_clear_forced(obj);
     coopnet_client_reset_commanded_tile_for(obj);
     register_begin(ANIMATION_REQUEST_RESERVED);
     register_priority(1);
@@ -5781,7 +5872,7 @@ static void coopnet_apply_combat_participant(const CoopCombatParticipant& p)
             && !(g_coopParticipants[index].moveDest != -1)) {
             // A tile or two off after a replayed walk: step there instead of hopping.
             coopnet_log_npc_move("resync step", object, p);
-            register_clear(object);
+            register_clear_forced(object);
             register_begin(ANIMATION_REQUEST_UNRESERVED);
             g_coopSanctionedMoveDepth++;
             register_object_move_to_tile(object, p.tile, p.elevation, -1, 0);
@@ -5794,7 +5885,7 @@ static void coopnet_apply_combat_participant(const CoopCombatParticipant& p)
         }
         coopnet_log_npc_move("resync snap", object, p);
         Rect syncRect;
-        register_clear(object);
+        register_clear_forced(object);
         obj_move_to_tile(object, p.tile, p.elevation, &syncRect);
         obj_set_rotation(object, p.rotation, &syncRect);
         tile_refresh_rect(&syncRect, p.elevation);
@@ -5837,7 +5928,7 @@ static void coopnet_apply_combat_participant(const CoopCombatParticipant& p)
             // the host has it.
             coopnet_log_npc_move(drifted ? "replay drifted, snap" : (timedOut ? "replay timed out, snap" : "replay stopped, snap"), object, p);
             Rect snapRect;
-            register_clear(object);
+            register_clear_forced(object);
             obj_move_to_tile(object, p.tile, p.elevation, &snapRect);
             obj_set_rotation(object, p.rotation, &snapRect);
             tile_refresh_rect(&snapRect, p.elevation);
@@ -5910,7 +6001,7 @@ static void coopnet_apply_combat_participant(const CoopCombatParticipant& p)
     }
 
     bool hostRunning = FID_TYPE(p.fid) == OBJ_TYPE_CRITTER && FID_ANIM_TYPE(p.fid) == ANIM_RUNNING;
-    register_clear(object);
+    register_clear_forced(object);
     register_begin(ANIMATION_REQUEST_UNRESERVED);
     g_coopSanctionedMoveDepth++;
     if (g_coopClientInCombat || hostRunning) {
@@ -6081,6 +6172,14 @@ static void coopnet_client_apply_map_transition(const CoopMapTransition& transit
     map_reset_transition_state();
 
     g_coopClientMapLoading = true;
+    if (transition.rngValid) {
+        int state[34];
+        for (int i = 0; i < 34; i++) {
+            state[i] = transition.rng[i];
+        }
+        roll_set_state(state);
+        debug_printf("\nCoop: client loads %s with the host's random state\n", mapName);
+    }
     if (map_load(mapName) == -1) {
         g_coopClientMapLoading = false;
         coopnet_report_glitch("client failed to load map %s for MAP_TRANSITION\n", mapName);
@@ -6786,7 +6885,7 @@ static void coopnet_poll_client()
                         obj_set_rotation(attacker, attackAnim.facing, &faceRect);
                         tile_refresh_rect(&faceRect, attacker->elevation);
                     }
-                    register_clear(attacker);
+                    register_clear_forced(attacker);
                     coopnet_client_reset_commanded_tile_for(attacker);
                     register_begin(ANIMATION_REQUEST_RESERVED);
                     register_priority(1);
@@ -6809,7 +6908,7 @@ static void coopnet_poll_client()
                 memcpy(&objectAnim, payload, sizeof(objectAnim));
                 Object* obj = coopnet_resolve_anim_object(objectAnim.attackerId);
                 if (obj != NULL) {
-                    register_clear(obj);
+                    register_clear_forced(obj);
                     coopnet_client_reset_commanded_tile_for(obj);
                     register_begin(ANIMATION_REQUEST_RESERVED);
                     register_priority(1);
@@ -6825,7 +6924,7 @@ static void coopnet_poll_client()
                     if (attacker == NULL) {
                         attacker = defender;
                     }
-                    register_clear(defender);
+                    register_clear_forced(defender);
                     coopnet_client_reset_commanded_tile_for(defender);
                     register_begin(ANIMATION_REQUEST_RESERVED);
                     register_priority(1);
@@ -6852,7 +6951,7 @@ static void coopnet_poll_client()
                     Object* moveTarget = move.destObjId != -1 ? coopnet_resolve_anim_object(move.destObjId) : NULL;
                     int steps = move.actionPoints != 0 ? move.actionPoints : -1;
 
-                    register_clear(obj);
+                    register_clear_forced(obj);
                     g_coopSanctionedMoveDepth++;
                     register_begin(ANIMATION_REQUEST_UNRESERVED);
                     if (moveTarget != NULL && moveTarget != obj) {
@@ -6902,7 +7001,7 @@ static void coopnet_poll_client()
                 memcpy(&objAnim, payload, sizeof(objAnim));
                 Object* animObj = coopnet_resolve_anim_object(objAnim.objId);
                 if (animObj != NULL && objAnim.anim > 0 && objAnim.anim < ANIM_COUNT) {
-                    register_clear(animObj);
+                    register_clear_forced(animObj);
                     coopnet_client_reset_commanded_tile_for(animObj);
                     register_begin(ANIMATION_REQUEST_RESERVED | ANIMATION_REQUEST_NO_STAND);
                     if (hexGridTileIsValid(objAnim.faceTile)) {
@@ -7010,6 +7109,22 @@ static void coopnet_poll_client()
     }
 }
 
+// Memory the process holds right now, in MB (working set and private bytes).
+static void coopnet_memory_mb(unsigned long long* workingSet, unsigned long long* privateBytes)
+{
+    *workingSet = 0;
+    *privateBytes = 0;
+#ifdef _WIN32
+    PROCESS_MEMORY_COUNTERS_EX counters;
+    memset(&counters, 0, sizeof(counters));
+    counters.cb = sizeof(counters);
+    if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters), sizeof(counters))) {
+        *workingSet = counters.WorkingSetSize / (1024 * 1024);
+        *privateBytes = counters.PrivateUsage / (1024 * 1024);
+    }
+#endif
+}
+
 static void coopnet_net_stats_tick()
 {
     static uint32_t lastPollMs = 0;
@@ -7061,8 +7176,11 @@ static void coopnet_net_stats_tick()
         }
     }
 
-    debug_printf("\nCoop-net: %us window: sent %u msgs / %u B (dropped %u, failed %u, blocked %u ms), recv %u msgs / %u B, max recv gap %u ms, max poll gap %u ms, backlog %d B; top sent types [%s] recv types [%s]\n",
-        (unsigned)((now - lastLogMs) / 1000),
+    unsigned long long memWorking = 0;
+    unsigned long long memPrivate = 0;
+    coopnet_memory_mb(&memWorking, &memPrivate);
+    debug_printf("\nCoop-net: %us window: memory %llu MB (private %llu MB); sent %u msgs / %u B (dropped %u, failed %u, blocked %u ms), recv %u msgs / %u B, max recv gap %u ms, max poll gap %u ms, backlog %d B; top sent types [%s] recv types [%s]\n",
+        (unsigned)((now - lastLogMs) / 1000), memWorking, memPrivate,
         g_coopNetStats.sentMsgs, g_coopNetStats.sentBytes, g_coopNetStats.dropped, g_coopNetStats.failed, g_coopNetStats.blockedMs,
         g_coopNetStats.recvMsgs, g_coopNetStats.recvBytes, g_coopNetStats.maxRecvGapMs, g_coopNetStats.maxPollGapMs,
         g_coopRecvBufferLen, sentTop, recvTop);

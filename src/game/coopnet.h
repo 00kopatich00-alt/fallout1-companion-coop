@@ -509,6 +509,10 @@ void coopnet_notify_dialogue_visual_end();
 // Host: a talking-head frame was just drawn (gdialog.cc); the client draws the same.
 void coopnet_notify_head_frame(int fid, int frame);
 
+// Host: called as a map load starts, remembers the random generator so the client can
+// load the same map with the same random choices (random encounter maps).
+void coopnet_note_map_load_begin();
+
 // Host: a one-off animation (a ladder climb) a mirrored character is playing now;
 // the client replays it. faceTile turns the character towards it first (-1 = no turn).
 void coopnet_notify_object_anim(Object* obj, int anim, int faceTile);
