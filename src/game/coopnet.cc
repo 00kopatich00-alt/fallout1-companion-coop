@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <set>
 #include <vector>
 
 #include <SDL.h>
@@ -48,6 +49,7 @@ typedef int CoopSocket;
 #include "game/cycle.h"
 #include "game/display.h"
 #include "game/gdialog.h"
+#include "game/gmovie.h"
 #include "game/gmouse.h"
 #include "game/gsound.h"
 #include "game/heap.h"
@@ -164,6 +166,17 @@ enum CoopMsgType : uint8_t {
     COOP_MSG_CHAR_RESTORE = 63, // host -> client, "this is how far that character got in MY world" -- the client applies it -- see CoopCharBlob
     COOP_MSG_XP = 64, // host -> client, experience the party just earned -- see CoopXp
     COOP_MSG_HEAD_FRAME = 65, // host -> client, the talking-head frame the host just drew -- see CoopHeadFrame
+    COOP_MSG_SCENERY_DELTA = 77, // host -> client, scenery that appeared or vanished since the list (the police box...)
+    COOP_MSG_PING = 75, // either direction, a timestamp the peer must echo back at once
+    COOP_MSG_PONG = 76, // either direction, the echo: the round trip time is read from it
+    COOP_MSG_REMOTE_CURSOR = 74, // host -> client, the picture of the host's mouse pointer (an arrow, or the item being dragged) when it changes
+    COOP_MSG_MOVIE_PLAY = 72, // host -> client, a cutscene started on the host: play the same one (int32 movie, int32 flags)
+    COOP_MSG_MOVIE_STOP = 73, // host -> client, the host's cutscene is over
+    COOP_MSG_SCENERY_LIST = 71, // host -> client, every piece of scenery on the host's map (cacti, rocks...) so the client can make its own map match
+    COOP_MSG_REMOTE_FRAME_END = 67, // host -> client, every block of one picture has been sent: show it now (no half-updated pictures)
+    COOP_MSG_REMOTE_COPY = 68, // host -> client, a block of the picture is an older block moved by the scroll: copy it instead of resending it
+    COOP_MSG_REMOTE_TILEZ = 69, // host -> client, a compressed 32x32 block
+    COOP_MSG_REMOTE_PAUSE = 70, // host -> client, a cutscene is playing: stop showing the screen (1) / the screen is back (0)
     COOP_MSG_OBJ_ANIM = 66, // host -> client, a one-off animation of a mirrored character (ladder climb) -- see CoopObjAnim
 };
 
@@ -238,7 +251,7 @@ struct CoopSettings {
 // Bumped whenever behavior changes in a way an older exe on the other side
 // would misread -- a mismatch is now refused with a clear message (see the
 // HELLO handling) instead of producing confusing half-working sessions.
-const uint32_t kCoopProtocolVersion = 5;
+const uint32_t kCoopProtocolVersion = 12;
 
 struct CoopHello {
     uint32_t protocolVersion;
@@ -666,6 +679,166 @@ struct CoopRemoteTile {
 struct CoopRemotePalette {
     uint8_t colors[256 * 3];
 };
+
+// The host's mouse pointer: an arrow, or while dragging, the picture of the item.
+// It is not part of the streamed screen (the client draws it at its own hand),
+// so its image travels separately, in pieces, whenever it changes.
+struct CoopRemoteCursorHeader {
+    int16_t width;
+    int16_t height;
+    int16_t hotX;
+    int16_t hotY;
+    uint8_t transparent;
+    uint8_t index; // piece number
+    uint8_t count; // number of pieces
+    uint16_t size; // bytes in this piece
+};
+
+const int kCoopCursorPiece = 1000;
+
+// A block of the new picture that already existed, moved, in the previous one
+// (the world map scrolling): the client copies it from its last shown picture.
+struct CoopRemoteCopy {
+    int16_t tx;
+    int16_t ty;
+    int16_t sx; // source position in pixels
+    int16_t sy;
+};
+
+// A compressed block: 6 header bytes, then `size` bytes of compressed pixels.
+struct CoopRemoteTileZHeader {
+    int16_t tx;
+    int16_t ty;
+    uint16_t size;
+};
+
+// A small LZ77 codec (the LZ4 block layout). Most of what is streamed is flat
+// colour (panels, black, text), which shrinks to a fraction. Returns the
+// compressed size, or 0 if it did not fit into `cap` bytes.
+static int coopnet_lz_compress(const uint8_t* in, int n, uint8_t* out, int cap)
+{
+    static int table[4096];
+    for (int i = 0; i < 4096; i++) {
+        table[i] = -1;
+    }
+    int ip = 0;
+    int anchor = 0;
+    int op = 0;
+    while (ip + 4 <= n) {
+        uint32_t seq;
+        memcpy(&seq, in + ip, 4);
+        uint32_t h = (seq * 2654435761u) >> 20;
+        int ref = table[h];
+        table[h] = ip;
+        if (ref >= 0 && ip - ref <= 65535 && memcmp(in + ref, in + ip, 4) == 0) {
+            int mlen = 4;
+            while (ip + mlen < n && in[ref + mlen] == in[ip + mlen]) {
+                mlen++;
+            }
+            int lit = ip - anchor;
+            int ml = mlen - 4;
+            if (op + 1 + lit + lit / 255 + 2 + 2 + ml / 255 + 2 > cap) {
+                return 0;
+            }
+            out[op++] = static_cast<uint8_t>(((lit < 15 ? lit : 15) << 4) | (ml < 15 ? ml : 15));
+            if (lit >= 15) {
+                int r = lit - 15;
+                while (r >= 255) {
+                    out[op++] = 255;
+                    r -= 255;
+                }
+                out[op++] = static_cast<uint8_t>(r);
+            }
+            memcpy(out + op, in + anchor, lit);
+            op += lit;
+            int off = ip - ref;
+            out[op++] = static_cast<uint8_t>(off & 255);
+            out[op++] = static_cast<uint8_t>(off >> 8);
+            if (ml >= 15) {
+                int r = ml - 15;
+                while (r >= 255) {
+                    out[op++] = 255;
+                    r -= 255;
+                }
+                out[op++] = static_cast<uint8_t>(r);
+            }
+            ip += mlen;
+            anchor = ip;
+        } else {
+            ip++;
+        }
+    }
+    int lit = n - anchor;
+    if (op + 1 + lit + lit / 255 + 2 > cap) {
+        return 0;
+    }
+    out[op++] = static_cast<uint8_t>((lit < 15 ? lit : 15) << 4);
+    if (lit >= 15) {
+        int r = lit - 15;
+        while (r >= 255) {
+            out[op++] = 255;
+            r -= 255;
+        }
+        out[op++] = static_cast<uint8_t>(r);
+    }
+    memcpy(out + op, in + anchor, lit);
+    op += lit;
+    return op;
+}
+
+static bool coopnet_lz_decompress(const uint8_t* in, int inLen, uint8_t* out, int outCap)
+{
+    int ip = 0;
+    int op = 0;
+    while (ip < inLen) {
+        int token = in[ip++];
+        int lit = token >> 4;
+        if (lit == 15) {
+            int b;
+            do {
+                if (ip >= inLen) {
+                    return false;
+                }
+                b = in[ip++];
+                lit += b;
+            } while (b == 255);
+        }
+        if (ip + lit > inLen || op + lit > outCap) {
+            return false;
+        }
+        memcpy(out + op, in + ip, lit);
+        ip += lit;
+        op += lit;
+        if (ip >= inLen) {
+            break;
+        }
+        if (ip + 2 > inLen) {
+            return false;
+        }
+        int off = in[ip] | (in[ip + 1] << 8);
+        ip += 2;
+        int ml = token & 15;
+        if (ml == 15) {
+            int b;
+            do {
+                if (ip >= inLen) {
+                    return false;
+                }
+                b = in[ip++];
+                ml += b;
+            } while (b == 255);
+        }
+        ml += 4;
+        if (off == 0 || off > op || op + ml > outCap) {
+            return false;
+        }
+        for (int i = 0; i < ml; i++) {
+            out[op + i] = out[op - off + i];
+        }
+        op += ml;
+    }
+    return op == outCap;
+}
 
 struct CoopRemoteInput {
     int32_t x;
@@ -1489,6 +1662,14 @@ struct CoopNetStats {
     uint32_t recvByType[256];
 };
 static CoopNetStats g_coopNetStats;
+static uint32_t g_coopSendStallUntilMs = 0; // see coopnet_send_message(): the peer stopped reading
+
+// Round-trip measurement: every second each side sends a PING with its clock, the
+// other answers with the same number, and the time that took is the "ping".
+static float g_coopRttMs = -1.0f;
+static uint32_t g_coopLastPongMs = 0;
+static uint32_t g_coopLastPingMs = 0;
+static uint32_t g_coopRttSamples = 0;
 static uint32_t g_coopNetStatsLastRecvMs = 0;
 
 static bool coopnet_send_message(CoopSocket sock, uint8_t type, const void* payload, uint16_t payloadLen)
@@ -1536,7 +1717,12 @@ static bool coopnet_send_message(CoopSocket sock, uint8_t type, const void* payl
                     g_coopNetStats.dropped++;
                     return false;
                 }
-                if (coopnet_now_ms() - startMs > kCoopSendTimeoutMs) {
+                // After one timeout the peer is plainly not reading (it sits in a death
+                // screen, a menu or a load): for the next ten seconds give up after 30 ms
+                // so the game keeps running instead of freezing on every message.
+                const uint32_t patience = coopnet_now_ms() < g_coopSendStallUntilMs ? 30u : kCoopSendTimeoutMs;
+                if (coopnet_now_ms() - startMs > patience) {
+                    g_coopSendStallUntilMs = coopnet_now_ms() + 10000;
                     g_coopNetStats.failed++;
                     g_coopNetStats.blockedMs += coopnet_now_ms() - startMs;
                     coopnet_report_glitch("send() timed out (buffer never drained), dropping message type=%d\n", type);
@@ -1559,8 +1745,20 @@ static bool coopnet_send_message(CoopSocket sock, uint8_t type, const void* payl
     uint32_t blocked = coopnet_now_ms() - startMs;
     if (blocked > 1) {
         g_coopNetStats.blockedMs += blocked;
+    } else {
+        g_coopSendStallUntilMs = 0; // went out at once: the peer is reading again
     }
     return true;
+}
+
+// For things that are fine to skip when the peer is busy (pings and their answers).
+static bool coopnet_send_droppable(CoopSocket sock, uint8_t type, const void* payload, uint16_t payloadLen)
+{
+    bool previous = g_coopSendDroppable;
+    g_coopSendDroppable = true;
+    bool ok = coopnet_send_message(sock, type, payload, payloadLen);
+    g_coopSendDroppable = previous;
+    return ok;
 }
 
 // Set by coopnet_try_recv_message() when the peer closed the connection or the
@@ -1635,6 +1833,21 @@ static bool coopnet_try_recv_message(CoopSocket sock, uint8_t* outType, unsigned
         memmove(g_coopRecvBuffer, g_coopRecvBuffer + totalNeeded, remaining);
     }
     g_coopRecvBufferLen = remaining;
+
+    if (header.type == COOP_MSG_PING && header.length == 4) {
+        coopnet_send_droppable(sock, COOP_MSG_PONG, outPayload, 4);
+        return coopnet_try_recv_message(sock, outType, outPayload, outPayloadLen);
+    }
+    if (header.type == COOP_MSG_PONG && header.length == 4) {
+        uint32_t sentAt;
+        memcpy(&sentAt, outPayload, 4);
+        uint32_t nowMs = coopnet_now_ms();
+        float rtt = static_cast<float>(nowMs - sentAt);
+        g_coopRttMs = g_coopRttMs < 0.0f ? rtt : g_coopRttMs * 0.7f + rtt * 0.3f;
+        g_coopLastPongMs = nowMs;
+        g_coopRttSamples++;
+        return coopnet_try_recv_message(sock, outType, outPayload, outPayloadLen);
+    }
 
     return true;
 }
@@ -2307,6 +2520,8 @@ static void coopnet_close_worldmap_window();
 // combat-turn UI code -- forward-declared here so coopnet_shutdown() can
 // make sure the real end-turn/end-combat button panel never lingers open
 // after a disconnect.
+static void coopnet_remote_client_abort();
+
 static void coopnet_client_combat_turn_ui_end();
 
 void coopnet_shutdown()
@@ -2323,6 +2538,7 @@ void coopnet_shutdown()
     coopnet_client_end_dialogue_visual();
     coopnet_close_worldmap_window();
     coopnet_client_combat_turn_ui_end();
+    coopnet_remote_client_abort();
 }
 
 CoopRole coopnet_get_role()
@@ -2706,11 +2922,18 @@ static bool g_coopRemoteHostActive = false;
 // Set around screens the client drives that aren't part of a conversation (loot).
 static bool g_coopRemoteForceDrive = false;
 static bool g_coopRemoteHostFull = false;
-static std::vector<uint8_t> g_coopRemoteShadow;
+static std::vector<uint8_t> g_coopRemoteShadow; // what the client's NEXT picture will hold (blocks sent so far this picture)
+static std::vector<uint8_t> g_coopRemoteShadowFront; // what the client is SHOWING (the last finished picture)
+static uint32_t g_coopRemoteCursorHash = 0; // of the pointer image the client holds (0 = none)
+static bool g_coopRemoteFramePending = false; // blocks of a picture have gone out but its end marker has not
+static bool g_coopRemoteMoviePaused = false; // a cutscene is playing: nothing is streamed
+static int g_coopRemoteShiftX = 0; // the scroll seen last time, tried first
+static int g_coopRemoteShiftY = 0;
 static std::vector<uint8_t> g_coopRemoteTileSent; // per tile: has it gone out at least once
 static std::vector<CoopRemoteInput> g_coopRemoteInputQueue;
 static uint8_t g_coopRemotePalShadow[256 * 3];
 static uint32_t g_coopRemoteHostLastMs = 0;
+static uint32_t g_coopRemoteInputRecvMs = 0; // when the driver's input last arrived
 
 // Host-side. Call right before running a screen the client drives (barter,
 // "tell me about"); pairs with coopnet_remote_end(). No-op unless the current
@@ -2849,6 +3072,12 @@ static void coopnet_remote_begin_internal(bool viewOnly, bool travel)
     g_coopRemoteViewOnly = viewOnly;
 
     g_coopRemoteShadow.assign(static_cast<size_t>(gSdlSurface->w) * gSdlSurface->h, 0);
+    g_coopRemoteShadowFront.assign(static_cast<size_t>(gSdlSurface->w) * gSdlSurface->h, 0);
+    g_coopRemoteFramePending = false;
+    g_coopRemoteMoviePaused = false;
+    g_coopRemoteCursorHash = 0;
+    g_coopRemoteShiftX = 0;
+    g_coopRemoteShiftY = 0;
     g_coopRemoteTileSent.assign(static_cast<size_t>((gSdlSurface->w + kCoopRemoteTile - 1) / kCoopRemoteTile) * ((gSdlSurface->h + kCoopRemoteTile - 1) / kCoopRemoteTile), 0);
     g_coopRemoteInputQueue.clear();
     memset(g_coopRemotePalShadow, 0xFF, sizeof(g_coopRemotePalShadow));
@@ -2885,13 +3114,43 @@ bool coopnet_remote_host_owns_mouse()
 // Host side, once per presented frame while active (hooked from
 // renderPresent()): keeps the network alive (the driver's input arrives
 // through it), and sends the palette plus every 32x32 block that changed.
+// Does the block at (x0,y0) of the screen equal the block at (x0+dx, y0+dy) of the
+// picture the client is showing? (rows compared with an early exit)
+static bool coopnet_remote_block_matches(const SDL_Surface* s, int x0, int y0, int count, int rows, int dx, int dy)
+{
+    const int w = s->w;
+    const int h = s->h;
+    const int sx = x0 + dx;
+    const int sy = y0 + dy;
+    if (sx < 0 || sy < 0 || sx + count > w || sy + rows > h) {
+        return false;
+    }
+    for (int r = 0; r < rows; r++) {
+        const uint8_t* cur = static_cast<const uint8_t*>(s->pixels) + (y0 + r) * s->pitch + x0;
+        const uint8_t* old = &g_coopRemoteShadowFront[static_cast<size_t>(sy + r) * w + sx];
+        if (memcmp(cur, old, count) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void coopnet_remote_host_tick()
 {
     coopnet_poll();
     coopnet_remote_host_apply_one_input();
 
+    // A cutscene plays through its own path and never reaches this picture: sending
+    // what is in it produced the garbled pictures on the client.
+    if (g_coopRemoteMoviePaused) {
+        return;
+    }
+
     uint32_t now = coopnet_now_ms();
-    if (now - g_coopRemoteHostLastMs < 16) {
+    // 30 pictures a second are plenty, but while the driver is clicking and dragging
+    // the answer (the picked-up item, the pointer) should come back as fast as it can.
+    const uint32_t interval = now - g_coopRemoteInputRecvMs < 600 ? 12 : 33;
+    if (now - g_coopRemoteHostLastMs < interval) {
         return;
     }
     g_coopRemoteHostLastMs = now;
@@ -2913,11 +3172,65 @@ static void coopnet_remote_host_tick()
         if (memcmp(pal.colors, g_coopRemotePalShadow, sizeof(pal.colors)) != 0) {
             memcpy(g_coopRemotePalShadow, pal.colors, sizeof(pal.colors));
             coopnet_send_message(g_coopPeerSocket, COOP_MSG_REMOTE_PALETTE, &pal, sizeof(pal));
+            g_coopRemoteFramePending = true;
         }
     }
 
-    int w = s->w;
-    int h = s->h;
+    // The host's pointer image (arrow / dragged item), sent on its own when it changes.
+    {
+        unsigned char* shape = NULL;
+        int cw, ch, full, hx, hy;
+        char trans;
+        mouse_get_shape(&shape, &cw, &ch, &full, &hx, &hy, &trans);
+        if (shape != NULL && cw > 0 && ch > 0 && cw * ch <= 250 * 1000) {
+            std::vector<uint8_t> pixels(static_cast<size_t>(cw) * ch);
+            uint32_t hash = 2166136261u;
+            for (int row = 0; row < ch; row++) {
+                memcpy(&pixels[static_cast<size_t>(row) * cw], shape + static_cast<size_t>(row) * full, cw);
+            }
+            for (size_t i = 0; i < pixels.size(); i++) {
+                hash = (hash ^ pixels[i]) * 16777619u;
+            }
+            hash = (hash ^ static_cast<uint32_t>(cw * 7 + ch * 13 + hx * 31 + hy * 37 + static_cast<uint8_t>(trans))) * 16777619u;
+            if (hash == 0) {
+                hash = 1;
+            }
+            if (hash != g_coopRemoteCursorHash) {
+                int pieces = static_cast<int>((pixels.size() + kCoopCursorPiece - 1) / kCoopCursorPiece);
+                bool allSent = pieces > 0 && pieces < 250;
+                g_coopSendDroppable = true;
+                for (int p = 0; p < pieces && allSent; p++) {
+                    unsigned char message[sizeof(CoopRemoteCursorHeader) + kCoopCursorPiece];
+                    CoopRemoteCursorHeader head;
+                    head.width = static_cast<int16_t>(cw);
+                    head.height = static_cast<int16_t>(ch);
+                    head.hotX = static_cast<int16_t>(hx);
+                    head.hotY = static_cast<int16_t>(hy);
+                    head.transparent = static_cast<uint8_t>(trans);
+                    head.index = static_cast<uint8_t>(p);
+                    head.count = static_cast<uint8_t>(pieces);
+                    size_t offset = static_cast<size_t>(p) * kCoopCursorPiece;
+                    size_t n = pixels.size() - offset;
+                    if (n > static_cast<size_t>(kCoopCursorPiece)) {
+                        n = kCoopCursorPiece;
+                    }
+                    head.size = static_cast<uint16_t>(n);
+                    memcpy(message, &head, sizeof(head));
+                    memcpy(message + sizeof(head), &pixels[offset], n);
+                    allSent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_REMOTE_CURSOR, message, static_cast<uint16_t>(sizeof(head) + n));
+                }
+                g_coopSendDroppable = false;
+                if (allSent) {
+                    g_coopRemoteCursorHash = hash;
+                }
+            }
+        }
+    }
+
+    const int w = s->w;
+    const int h = s->h;
+    const int tilesX = (w + kCoopRemoteTile - 1) / kCoopRemoteTile;
+    const int tilesY = (h + kCoopRemoteTile - 1) / kCoopRemoteTile;
 
     // The host's pointer is drawn into the picture it streams, so the client saw
     // that copy of it, a round trip behind its own hand -- "the arrow is slightly
@@ -2930,68 +3243,156 @@ static void coopnet_remote_host_tick()
         pointerHiddenHere = true;
     }
 
-    // A burst of hundreds of ~1KB tiles can overflow the socket buffer, and
-    // coopnet_send_message() DROPS a message it can't get out in time -- a
-    // dropped tile then stays wrong on the client for good if the shadow was
-    // already updated (the garbled patches seen in testing). So: the shadow is
-    // only updated for tiles that were really sent, and at most
-    // kMaxTilesPerTick go out per frame; whatever's left differs from the
-    // shadow and simply goes out next frame.
-    const int kMaxTilesPerTick = 100;
-    int sent = 0;
-    bool anyLeft = false;
-    g_coopSendDroppable = true;
-    for (int ty = 0; ty * kCoopRemoteTile < h && !(anyLeft && sent == 0); ty++) {
-        for (int tx = 0; tx * kCoopRemoteTile < w; tx++) {
-            CoopRemoteTile tile;
-            tile.tx = static_cast<int16_t>(tx);
-            tile.ty = static_cast<int16_t>(ty);
-            memset(tile.pixels, 0, sizeof(tile.pixels));
-            size_t tileIndex = static_cast<size_t>(ty) * ((w + kCoopRemoteTile - 1) / kCoopRemoteTile) + tx;
+    // 1. which blocks differ from what the client will show?
+    std::vector<int> changedTiles;
+    for (int ty = 0; ty < tilesY; ty++) {
+        for (int tx = 0; tx < tilesX; tx++) {
+            size_t tileIndex = static_cast<size_t>(ty) * tilesX + tx;
             bool changed = tileIndex < g_coopRemoteTileSent.size() && !g_coopRemoteTileSent[tileIndex];
-            for (int row = 0; row < kCoopRemoteTile; row++) {
+            int x0 = tx * kCoopRemoteTile;
+            int count = w - x0 < kCoopRemoteTile ? w - x0 : kCoopRemoteTile;
+            for (int row = 0; row < kCoopRemoteTile && !changed; row++) {
                 int y = ty * kCoopRemoteTile + row;
                 if (y >= h) {
                     break;
                 }
-                int x0 = tx * kCoopRemoteTile;
-                int count = w - x0 < kCoopRemoteTile ? w - x0 : kCoopRemoteTile;
                 const uint8_t* src = static_cast<const uint8_t*>(s->pixels) + y * s->pitch + x0;
-                const uint8_t* shadow = &g_coopRemoteShadow[static_cast<size_t>(y) * w + x0];
-                memcpy(tile.pixels + row * kCoopRemoteTile, src, count);
-                if (memcmp(shadow, src, count) != 0) {
-                    changed = true;
-                }
+                changed = memcmp(&g_coopRemoteShadow[static_cast<size_t>(y) * w + x0], src, count) != 0;
             }
-            if (!changed) {
-                continue;
-            }
-            if (sent >= kMaxTilesPerTick) {
-                anyLeft = true;
-                continue;
-            }
-            if (coopnet_send_message(g_coopPeerSocket, COOP_MSG_REMOTE_TILE, &tile, sizeof(tile))) {
-                sent++;
-                if (tileIndex < g_coopRemoteTileSent.size()) {
-                    g_coopRemoteTileSent[tileIndex] = 1;
-                }
-                for (int row = 0; row < kCoopRemoteTile; row++) {
-                    int y = ty * kCoopRemoteTile + row;
-                    if (y >= h) {
-                        break;
-                    }
-                    int x0 = tx * kCoopRemoteTile;
-                    int count = w - x0 < kCoopRemoteTile ? w - x0 : kCoopRemoteTile;
-                    memcpy(&g_coopRemoteShadow[static_cast<size_t>(y) * w + x0], tile.pixels + row * kCoopRemoteTile, count);
-                }
-            } else {
-                anyLeft = true;
+            if (changed) {
+                changedTiles.push_back(static_cast<int>(tileIndex));
             }
         }
     }
 
+    // 2. is the picture scrolling (the world map)? Find one shift that explains many
+    // of the changed blocks; those are then sent as 8-byte "copy" orders.
+    int shiftX = 0;
+    int shiftY = 0;
+    if (changedTiles.size() >= 8) {
+        int samples[8];
+        for (int i = 0; i < 8; i++) {
+            samples[i] = changedTiles[(changedTiles.size() * (2 * i + 1)) / 16];
+        }
+        int bestScore = 0;
+        auto score = [&](int dx, int dy) {
+            int found = 0;
+            for (int i = 0; i < 8; i++) {
+                int tx = samples[i] % tilesX;
+                int ty = samples[i] / tilesX;
+                int x0 = tx * kCoopRemoteTile;
+                int count = w - x0 < kCoopRemoteTile ? w - x0 : kCoopRemoteTile;
+                int rows = h - ty * kCoopRemoteTile < kCoopRemoteTile ? h - ty * kCoopRemoteTile : kCoopRemoteTile;
+                if (coopnet_remote_block_matches(s, x0, ty * kCoopRemoteTile, count, rows, dx, dy)) {
+                    found++;
+                }
+            }
+            return found;
+        };
+        if (g_coopRemoteShiftX != 0 || g_coopRemoteShiftY != 0) {
+            int sc = score(g_coopRemoteShiftX, g_coopRemoteShiftY);
+            if (sc >= 3) {
+                bestScore = sc;
+                shiftX = g_coopRemoteShiftX;
+                shiftY = g_coopRemoteShiftY;
+            }
+        }
+        if (bestScore == 0) {
+            for (int dy = -16; dy <= 16; dy++) {
+                for (int dx = -16; dx <= 16; dx++) {
+                    if (dx == 0 && dy == 0) {
+                        continue;
+                    }
+                    int sc = score(dx, dy);
+                    if (sc > bestScore) {
+                        bestScore = sc;
+                        shiftX = dx;
+                        shiftY = dy;
+                    }
+                }
+            }
+            if (bestScore < 3) {
+                shiftX = 0;
+                shiftY = 0;
+            }
+        }
+    }
+    g_coopRemoteShiftX = shiftX;
+    g_coopRemoteShiftY = shiftY;
+
+    // 3. send. Blocks the socket cannot take now simply stay "changed" for the next
+    // call. The picture is finished (end marker) only when none is left, so the
+    // client never shows a half-updated picture.
+    const int kMaxBlocksPerTick = 200;
+    int sent = 0;
+    bool anyLeft = false;
+    g_coopSendDroppable = true;
+    for (size_t i = 0; i < changedTiles.size(); i++) {
+        if (sent >= kMaxBlocksPerTick) {
+            anyLeft = true;
+            break;
+        }
+        int tileIndex = changedTiles[i];
+        int tx = tileIndex % tilesX;
+        int ty = tileIndex / tilesX;
+        int x0 = tx * kCoopRemoteTile;
+        int count = w - x0 < kCoopRemoteTile ? w - x0 : kCoopRemoteTile;
+        int rows = h - ty * kCoopRemoteTile < kCoopRemoteTile ? h - ty * kCoopRemoteTile : kCoopRemoteTile;
+
+        bool ok = false;
+        if ((shiftX != 0 || shiftY != 0) && coopnet_remote_block_matches(s, x0, ty * kCoopRemoteTile, count, rows, shiftX, shiftY)) {
+            CoopRemoteCopy order;
+            order.tx = static_cast<int16_t>(tx);
+            order.ty = static_cast<int16_t>(ty);
+            order.sx = static_cast<int16_t>(x0 + shiftX);
+            order.sy = static_cast<int16_t>(ty * kCoopRemoteTile + shiftY);
+            ok = coopnet_send_message(g_coopPeerSocket, COOP_MSG_REMOTE_COPY, &order, sizeof(order));
+        }
+        if (!ok) {
+            // the block itself, compressed when that helps
+            uint8_t raw[kCoopRemoteTile * kCoopRemoteTile];
+            memset(raw, 0, sizeof(raw));
+            for (int row = 0; row < rows; row++) {
+                memcpy(raw + row * kCoopRemoteTile, static_cast<const uint8_t*>(s->pixels) + (ty * kCoopRemoteTile + row) * s->pitch + x0, count);
+            }
+            uint8_t packed[sizeof(CoopRemoteTileZHeader) + kCoopRemoteTile * kCoopRemoteTile];
+            int size = coopnet_lz_compress(raw, sizeof(raw), packed + sizeof(CoopRemoteTileZHeader), 900);
+            if (size > 0) {
+                CoopRemoteTileZHeader head;
+                head.tx = static_cast<int16_t>(tx);
+                head.ty = static_cast<int16_t>(ty);
+                head.size = static_cast<uint16_t>(size);
+                memcpy(packed, &head, sizeof(head));
+                ok = coopnet_send_message(g_coopPeerSocket, COOP_MSG_REMOTE_TILEZ, packed, static_cast<uint16_t>(sizeof(head) + size));
+            } else {
+                CoopRemoteTile tile;
+                tile.tx = static_cast<int16_t>(tx);
+                tile.ty = static_cast<int16_t>(ty);
+                memcpy(tile.pixels, raw, sizeof(raw));
+                ok = coopnet_send_message(g_coopPeerSocket, COOP_MSG_REMOTE_TILE, &tile, sizeof(tile));
+            }
+        }
+        if (!ok) {
+            anyLeft = true;
+            continue;
+        }
+        sent++;
+        g_coopRemoteFramePending = true;
+        g_coopRemoteTileSent[tileIndex] = 1;
+        for (int row = 0; row < rows; row++) {
+            memcpy(&g_coopRemoteShadow[static_cast<size_t>(ty * kCoopRemoteTile + row) * w + x0],
+                static_cast<const uint8_t*>(s->pixels) + (ty * kCoopRemoteTile + row) * s->pitch + x0, count);
+        }
+    }
+
+    if (g_coopRemoteFramePending && !anyLeft) {
+        if (coopnet_send_message(g_coopPeerSocket, COOP_MSG_REMOTE_FRAME_END, NULL, 0)) {
+            g_coopRemoteFramePending = false;
+            g_coopRemoteShadowFront = g_coopRemoteShadow;
+        }
+    }
+
     g_coopSendDroppable = false;
-    (void)anyLeft;
 
     if (pointerHiddenHere) {
         mouse_show();
@@ -3012,6 +3413,7 @@ static void coopnet_remote_host_apply_input(const CoopRemoteInput& in)
     if (g_coopRemoteInputQueue.size() < 256) {
         g_coopRemoteInputQueue.push_back(in);
     }
+    g_coopRemoteInputRecvMs = coopnet_now_ms();
 }
 
 // Mouse buttons as the host last applied them, and when one last went down.
@@ -3120,15 +3522,53 @@ static void coopnet_client_apply_map_transition(const CoopMapTransition& transit
 // Nonzero while a cutscene plays -- see coopnet_movie_begin() in coopnet.h.
 static int g_coopMovieDepth = 0;
 
-void coopnet_movie_begin()
+// Client side: the host's cutscene is being mirrored here.
+static bool g_coopClientHostMovieActive = false; // the host's movie is running (until its STOP)
+static bool g_coopClientMoviePending = false;
+static int g_coopClientMovieId = 0;
+static int g_coopClientMovieFlags = 0;
+static bool g_coopClientPlayingHostMovie = false;
+
+bool coopnet_client_movie_should_stop()
+{
+    return g_coopClientPlayingHostMovie && !g_coopClientHostMovieActive;
+}
+
+void coopnet_movie_begin(int movie, int flags)
 {
     g_coopMovieDepth++;
+    // Tell the client to play the same cutscene from its own copy of the game.
+    if (g_coopRole == CoopRole::Host && g_coopConnState == CoopConnState::Connected) {
+        int32_t message[2] = { movie, flags };
+        coopnet_send_message(g_coopPeerSocket, COOP_MSG_MOVIE_PLAY, message, sizeof(message));
+    }
+    // A cutscene on the host while the client is shown the host's screen (the world
+    // map): stop streaming; the client shows black until it is over.
+    if (g_coopRemoteHostActive && !g_coopRemoteMoviePaused) {
+        g_coopRemoteMoviePaused = true;
+        uint8_t paused = 1;
+        coopnet_send_message(g_coopPeerSocket, COOP_MSG_REMOTE_PAUSE, &paused, 1);
+    }
 }
 
 void coopnet_movie_end()
 {
     if (g_coopMovieDepth > 0) {
         g_coopMovieDepth--;
+    }
+    if (g_coopRole == CoopRole::Host && g_coopConnState == CoopConnState::Connected) {
+        coopnet_send_message(g_coopPeerSocket, COOP_MSG_MOVIE_STOP, NULL, 0);
+    }
+    if (g_coopRemoteMoviePaused && g_coopMovieDepth == 0) {
+        g_coopRemoteMoviePaused = false;
+        uint8_t paused = 0;
+        coopnet_send_message(g_coopPeerSocket, COOP_MSG_REMOTE_PAUSE, &paused, 1);
+        // the screen after the movie is sent from scratch
+        std::fill(g_coopRemoteTileSent.begin(), g_coopRemoteTileSent.end(), static_cast<uint8_t>(0));
+        g_coopRemoteFramePending = false;
+        g_coopRemoteShiftX = 0;
+        g_coopRemoteShiftY = 0;
+        memset(g_coopRemotePalShadow, 0xFF, sizeof(g_coopRemotePalShadow));
     }
     if (g_coopMovieDepth == 0 && g_coopPendingTransitionValid && !g_coopRemoteClientActive) {
         g_coopPendingTransitionValid = false;
@@ -3137,7 +3577,17 @@ void coopnet_movie_end()
 }
 static int g_coopRemoteW = 0;
 static int g_coopRemoteH = 0;
-static std::vector<uint8_t> g_coopRemoteFrame;
+static std::vector<uint8_t> g_coopRemoteFrame; // the picture being built (blocks are written here)
+static std::vector<uint8_t> g_coopRemoteFront; // the last finished picture: what is shown
+static std::vector<uint8_t> g_coopRemoteCursorPixels; // the host's pointer image, being received or complete
+static int g_coopRemoteCursorW = 0;
+static int g_coopRemoteCursorH = 0;
+static int g_coopRemoteCursorHotX = 0;
+static int g_coopRemoteCursorHotY = 0;
+static uint8_t g_coopRemoteCursorTrans = 0;
+static int g_coopRemoteCursorHave = 0; // pieces received so far
+static bool g_coopRemoteCursorValid = false;
+static bool g_coopRemoteClientPaused = false;
 static uint8_t g_coopRemotePal[256 * 3];
 static bool g_coopRemotePalDirty = false;
 static SDL_Surface* g_coopRemoteSurface = NULL;
@@ -3163,6 +3613,10 @@ static void coopnet_remote_client_begin(const CoopRemoteBegin& b)
     g_coopRemoteW = b.width;
     g_coopRemoteH = b.height;
     g_coopRemoteFrame.assign(static_cast<size_t>(b.width) * b.height, 0);
+    g_coopRemoteFront.assign(static_cast<size_t>(b.width) * b.height, 0);
+    g_coopRemoteClientPaused = false;
+    g_coopRemoteCursorValid = false;
+    g_coopRemoteCursorHave = 0;
     memset(g_coopRemotePal, 0, sizeof(g_coopRemotePal));
     g_coopRemotePalDirty = true;
     if (g_coopRemoteSurface != NULL) {
@@ -3205,6 +3659,71 @@ static void coopnet_remote_client_tile(const CoopRemoteTile& t)
     }
 }
 
+static void coopnet_remote_client_cursor_piece(const unsigned char* payload, int payloadLen)
+{
+    if (payloadLen < static_cast<int>(sizeof(CoopRemoteCursorHeader))) {
+        return;
+    }
+    CoopRemoteCursorHeader head;
+    memcpy(&head, payload, sizeof(head));
+    if (payloadLen != static_cast<int>(sizeof(head) + head.size) || head.width <= 0 || head.height <= 0 || head.count == 0) {
+        return;
+    }
+    size_t total = static_cast<size_t>(head.width) * head.height;
+    size_t offset = static_cast<size_t>(head.index) * kCoopCursorPiece;
+    if (head.index == 0) {
+        g_coopRemoteCursorPixels.assign(total, 0);
+        g_coopRemoteCursorHave = 0;
+        g_coopRemoteCursorValid = false;
+    }
+    if (g_coopRemoteCursorPixels.size() != total || offset + head.size > total || head.index != g_coopRemoteCursorHave) {
+        return;
+    }
+    memcpy(&g_coopRemoteCursorPixels[offset], payload + sizeof(head), head.size);
+    g_coopRemoteCursorHave++;
+    if (g_coopRemoteCursorHave == head.count) {
+        g_coopRemoteCursorW = head.width;
+        g_coopRemoteCursorH = head.height;
+        g_coopRemoteCursorHotX = head.hotX;
+        g_coopRemoteCursorHotY = head.hotY;
+        g_coopRemoteCursorTrans = head.transparent;
+        g_coopRemoteCursorValid = true;
+    }
+}
+
+// A block that was already in the last picture, moved (the map scrolled).
+static void coopnet_remote_client_copy(const CoopRemoteCopy& c)
+{
+    if (!g_coopRemoteClientActive) {
+        return;
+    }
+    int x0 = c.tx * kCoopRemoteTile;
+    int y0 = c.ty * kCoopRemoteTile;
+    for (int row = 0; row < kCoopRemoteTile; row++) {
+        int y = y0 + row;
+        int sy = c.sy + row;
+        if (y < 0 || y >= g_coopRemoteH || sy < 0 || sy >= g_coopRemoteH) {
+            continue;
+        }
+        for (int col = 0; col < kCoopRemoteTile; col++) {
+            int x = x0 + col;
+            int sx = c.sx + col;
+            if (x < 0 || x >= g_coopRemoteW || sx < 0 || sx >= g_coopRemoteW) {
+                continue;
+            }
+            g_coopRemoteFrame[static_cast<size_t>(y) * g_coopRemoteW + x] = g_coopRemoteFront[static_cast<size_t>(sy) * g_coopRemoteW + sx];
+        }
+    }
+}
+
+// All blocks of one picture have arrived: show it.
+static void coopnet_remote_client_frame_end()
+{
+    if (g_coopRemoteClientActive && g_coopRemoteFront.size() == g_coopRemoteFrame.size()) {
+        g_coopRemoteFront = g_coopRemoteFrame;
+    }
+}
+
 static void coopnet_remote_client_end()
 {
     if (!g_coopRemoteClientActive) {
@@ -3236,12 +3755,36 @@ static void coopnet_remote_client_end()
     }
 }
 
+// The game is going away under the remote screen (death, reset, lost connection):
+// drop it without repainting or applying a transition, or the host's last frame
+// stays on top of the main menu (confirmed via testing).
+static void coopnet_remote_client_abort()
+{
+    g_coopPendingTransitionValid = false;
+    g_coopRemoteClientTravel = false;
+    if (!g_coopRemoteClientActive) {
+        return;
+    }
+    g_coopRemoteClientActive = false;
+    SDL_DelEventWatch(coopnet_mouse_press_watch, NULL);
+    if (g_coopRemoteSurface != NULL) {
+        SDL_FreeSurface(g_coopRemoteSurface);
+        g_coopRemoteSurface = NULL;
+    }
+    debug_printf("\nCoop: remote screen dropped on client (game ended or reset)\n");
+}
+
 // Client side, once per presented frame while active (hooked from
 // renderPresent()): draws the host's screen over the client's own, and
 // forwards the driver's mouse and keys to the host.
 static void coopnet_remote_client_tick()
 {
     if (g_coopRemoteSurface == NULL || gSdlTextureSurface == NULL) {
+        return;
+    }
+
+    // Our own copy of the host's cutscene is playing: it owns the screen.
+    if (g_coopClientPlayingHostMovie) {
         return;
     }
 
@@ -3257,9 +3800,14 @@ static void coopnet_remote_client_tick()
         g_coopRemotePalDirty = false;
     }
 
+    if (g_coopRemoteClientPaused) {
+        // a cutscene is playing on the host
+        SDL_FillRect(gSdlTextureSurface, NULL, SDL_MapRGB(gSdlTextureSurface->format, 0, 0, 0));
+        return;
+    }
     for (int y = 0; y < g_coopRemoteH; y++) {
         memcpy(static_cast<uint8_t*>(g_coopRemoteSurface->pixels) + y * g_coopRemoteSurface->pitch,
-            &g_coopRemoteFrame[static_cast<size_t>(y) * g_coopRemoteW], g_coopRemoteW);
+            &g_coopRemoteFront[static_cast<size_t>(y) * g_coopRemoteW], g_coopRemoteW);
     }
     SDL_BlitSurface(g_coopRemoteSurface, NULL, gSdlTextureSurface, NULL);
 
@@ -3273,8 +3821,21 @@ static void coopnet_remote_client_tick()
         int shapeW, shapeH, shapeFull, hotX, hotY;
         char trans;
         mouse_get_shape(&shape, &shapeW, &shapeH, &shapeFull, &hotX, &hotY, &trans);
-        SDL_Palette* palette = gSdlSurface != NULL ? gSdlSurface->format->palette : NULL;
-        if (shape != NULL && palette != NULL && gSdlTextureSurface->format->BytesPerPixel == 4) {
+        if (g_coopRemoteCursorValid) {
+            // The HOST's pointer image (an arrow, or the item being dragged), drawn
+            // at our own hand's position.
+            shape = g_coopRemoteCursorPixels.data();
+            shapeW = g_coopRemoteCursorW;
+            shapeH = g_coopRemoteCursorH;
+            shapeFull = g_coopRemoteCursorW;
+            hotX = g_coopRemoteCursorHotX;
+            hotY = g_coopRemoteCursorHotY;
+            trans = static_cast<char>(g_coopRemoteCursorTrans);
+        }
+        // Colours come from the HOST's palette (the one the picture itself uses): our own
+        // game palette can be faded to black while a host screen is shown, which made
+        // the pointer vanish.
+        if (shape != NULL && gSdlTextureSurface->format->BytesPerPixel == 4) {
             int pointerX, pointerY;
             mouse_get_position(&pointerX, &pointerY);
             int left = pointerX - hotX;
@@ -3291,8 +3852,7 @@ static void coopnet_remote_client_tick()
                     if (x < 0 || x >= gSdlTextureSurface->w || index == static_cast<unsigned char>(trans)) {
                         continue;
                     }
-                    const SDL_Color& color = palette->colors[index];
-                    line[x] = SDL_MapRGB(gSdlTextureSurface->format, color.r, color.g, color.b);
+                    line[x] = SDL_MapRGB(gSdlTextureSurface->format, g_coopRemotePal[index * 3], g_coopRemotePal[index * 3 + 1], g_coopRemotePal[index * 3 + 2]);
                 }
             }
         }
@@ -3973,6 +4533,8 @@ void coopnet_host_map_load_leave()
     }
 }
 
+static void coopnet_host_send_scenery_list();
+
 static void coopnet_host_check_map_transition()
 {
     if (g_coopHostMapLoadDepth > 0 || g_coopMovieDepth > 0) {
@@ -4056,6 +4618,10 @@ static void coopnet_host_check_map_transition()
     bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_MAP_TRANSITION, &transition, sizeof(transition));
     debug_printf("\nCoop: sent MAP_TRANSITION to %.16s (tile=%d elevation=%d sameMapElevationOnly=%d) success=%d\n",
         transition.mapName, transition.tile, transition.elevation, transition.sameMapElevationOnly, sent);
+
+    if (mapChanged) {
+        coopnet_host_send_scenery_list();
+    }
 
     if (mapChanged && kCoopCompanionInventorySyncEnabled) {
         coopnet_host_broadcast_companion_inventory();
@@ -4208,6 +4774,178 @@ static void coopnet_fill_transition_rng(CoopMapTransition& transition)
     for (int i = 0; i < 34; i++) {
         transition.rng[i] = g_coopMapLoadRng[i];
     }
+}
+
+// The scenery on a map (cacti, rocks, wrecks...) is chosen when the map loads, and for
+// random encounters differently on every load: the client's copy of "the same" map
+// had other objects, so it walked round cacti it could not see. The host sends the
+// whole list once per map; the client hides what the host does not have and adds
+// what it lacks (coopnet_client_reconcile_scenery()).
+struct CoopSceneryEntry {
+    int32_t pid;
+    int32_t tile;
+    int32_t elevation;
+};
+
+struct CoopSceneryListHeader {
+    char map[16];
+    uint8_t first;
+    uint8_t last;
+    uint16_t count;
+};
+
+const int kCoopSceneryPerMessage = 140;
+
+struct CoopSceneryDeltaHeader {
+    char map[16];
+    uint8_t add; // 1 = these appeared, 0 = these are gone
+    uint8_t reserved;
+    uint16_t count;
+};
+
+static std::set<uint64_t> g_coopHostSceneryKeys; // what the client has been told exists
+
+// Scenery and loose ground items are matched to the host's map: an encounter's loot is
+// placed by a script the client runs with different luck (missing loot on the client).
+static bool coopnet_is_synced_static(const Object* o)
+{
+    int type = FID_TYPE(o->fid);
+    return type == OBJ_TYPE_SCENERY || type == OBJ_TYPE_ITEM;
+}
+
+static void coopnet_set_static_hidden(Object* o, bool hidden)
+{
+    int extra = FID_TYPE(o->fid) == OBJ_TYPE_SCENERY ? OBJECT_NO_BLOCK : 0;
+    if (hidden) {
+        o->flags |= (OBJECT_HIDDEN | extra);
+    } else {
+        o->flags &= ~(OBJECT_HIDDEN | extra);
+    }
+}
+
+static uint64_t coopnet_scenery_key(int pid, int tile, int elevation)
+{
+    return (static_cast<uint64_t>(static_cast<uint32_t>(pid)) << 20) | (static_cast<uint64_t>(tile & 0xFFFF) << 2) | static_cast<uint64_t>(elevation & 3);
+}
+
+static void coopnet_host_send_scenery_list()
+{
+    if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected) {
+        return;
+    }
+    std::vector<CoopSceneryEntry> entries;
+    for (int elevation = 0; elevation < ELEVATION_COUNT; elevation++) {
+        for (Object* o = obj_find_first_at(elevation); o != NULL; o = obj_find_next_at()) {
+            if (coopnet_is_synced_static(o) && o->tile != -1 && (o->flags & OBJECT_HIDDEN) == 0 && entries.size() < 20000) {
+                CoopSceneryEntry e;
+                e.pid = o->pid;
+                e.tile = o->tile;
+                e.elevation = elevation;
+                entries.push_back(e);
+            }
+        }
+    }
+
+    size_t offset = 0;
+    bool firstMessage = true;
+    do {
+        size_t n = entries.size() - offset;
+        if (n > static_cast<size_t>(kCoopSceneryPerMessage)) {
+            n = kCoopSceneryPerMessage;
+        }
+        unsigned char buffer[sizeof(CoopSceneryListHeader) + kCoopSceneryPerMessage * sizeof(CoopSceneryEntry)];
+        CoopSceneryListHeader head;
+        memset(&head, 0, sizeof(head));
+        strncpy(head.map, map_data.name, sizeof(head.map) - 1);
+        head.first = firstMessage ? 1 : 0;
+        head.last = offset + n >= entries.size() ? 1 : 0;
+        head.count = static_cast<uint16_t>(n);
+        memcpy(buffer, &head, sizeof(head));
+        if (n > 0) {
+            memcpy(buffer + sizeof(head), &entries[offset], n * sizeof(CoopSceneryEntry));
+        }
+        coopnet_send_message(g_coopPeerSocket, COOP_MSG_SCENERY_LIST, buffer, static_cast<uint16_t>(sizeof(head) + n * sizeof(CoopSceneryEntry)));
+        offset += n;
+        firstMessage = false;
+    } while (offset < entries.size());
+    debug_printf("\nCoop: sent the scenery list of %.16s (%d objects)\n", map_data.name, static_cast<int>(entries.size()));
+
+    g_coopHostSceneryKeys.clear();
+    for (size_t i = 0; i < entries.size(); i++) {
+        g_coopHostSceneryKeys.insert(coopnet_scenery_key(entries[i].pid, entries[i].tile, entries[i].elevation));
+    }
+}
+
+static void coopnet_host_send_scenery_delta(const std::vector<uint64_t>& keys, bool add)
+{
+    size_t offset = 0;
+    while (offset < keys.size()) {
+        size_t n = keys.size() - offset;
+        if (n > static_cast<size_t>(kCoopSceneryPerMessage)) {
+            n = kCoopSceneryPerMessage;
+        }
+        unsigned char buffer[sizeof(CoopSceneryDeltaHeader) + kCoopSceneryPerMessage * sizeof(CoopSceneryEntry)];
+        CoopSceneryDeltaHeader head;
+        memset(&head, 0, sizeof(head));
+        strncpy(head.map, map_data.name, sizeof(head.map) - 1);
+        head.add = add ? 1 : 0;
+        head.count = static_cast<uint16_t>(n);
+        memcpy(buffer, &head, sizeof(head));
+        CoopSceneryEntry* entries = reinterpret_cast<CoopSceneryEntry*>(buffer + sizeof(head));
+        for (size_t i = 0; i < n; i++) {
+            uint64_t key = keys[offset + i];
+            entries[i].pid = static_cast<int32_t>(static_cast<uint32_t>(key >> 20));
+            entries[i].tile = static_cast<int32_t>((key >> 2) & 0xFFFF);
+            entries[i].elevation = static_cast<int32_t>(key & 3);
+        }
+        coopnet_send_message(g_coopPeerSocket, COOP_MSG_SCENERY_DELTA, buffer, static_cast<uint16_t>(sizeof(head) + n * sizeof(CoopSceneryEntry)));
+        offset += n;
+    }
+}
+
+// Once a second: compare the host's scenery with what the client was told, and
+// send only the difference. The list is sent once per map; things a script adds or
+// removes later (a police box in the desert) never reached the client.
+static void coopnet_host_scenery_delta_tick()
+{
+    if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected || g_coopHostSceneryKeys.empty() || g_coopClientMapLoading) {
+        return;
+    }
+    std::set<uint64_t> now;
+    for (int elevation = 0; elevation < ELEVATION_COUNT; elevation++) {
+        for (Object* o = obj_find_first_at(elevation); o != NULL; o = obj_find_next_at()) {
+            if (coopnet_is_synced_static(o) && o->tile != -1 && (o->flags & OBJECT_HIDDEN) == 0 && now.size() < 20000) {
+                now.insert(coopnet_scenery_key(o->pid, o->tile, elevation));
+            }
+        }
+    }
+    std::vector<uint64_t> removed;
+    std::vector<uint64_t> added;
+    for (std::set<uint64_t>::const_iterator it = g_coopHostSceneryKeys.begin(); it != g_coopHostSceneryKeys.end(); ++it) {
+        if (now.find(*it) == now.end()) {
+            removed.push_back(*it);
+        }
+    }
+    for (std::set<uint64_t>::const_iterator it = now.begin(); it != now.end(); ++it) {
+        if (g_coopHostSceneryKeys.find(*it) == g_coopHostSceneryKeys.end()) {
+            added.push_back(*it);
+        }
+    }
+    if (removed.empty() && added.empty()) {
+        return;
+    }
+    if (removed.size() + added.size() > 2000) {
+        coopnet_host_send_scenery_list(); // a whole new map: start over
+        return;
+    }
+    if (!removed.empty()) {
+        coopnet_host_send_scenery_delta(removed, false);
+    }
+    if (!added.empty()) {
+        coopnet_host_send_scenery_delta(added, true);
+    }
+    g_coopHostSceneryKeys = now;
+    debug_printf("\nCoop: scenery changed on the host: %d gone, %d new\n", static_cast<int>(removed.size()), static_cast<int>(added.size()));
 }
 
 // obj_destroy() leaves any animation sequence that still owns the object running;
@@ -5029,6 +5767,7 @@ static void coopnet_poll_host()
                     coopnet_host_reset_world_shadow();
                     bool syncSent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_MAP_TRANSITION, &sync, sizeof(sync));
                     debug_printf("\nCoop: sent connect-time MAP_TRANSITION to %.16s success=%d\n", sync.mapName, syncSent);
+                    coopnet_host_send_scenery_list();
                 }
 
                 coopnet_status(COOP_STATUS_GOOD, "Your friend connected!");
@@ -5204,6 +5943,24 @@ static void coopnet_poll_host()
                 if (g_coopCompanion != NULL && g_coopCompanion->data.inventory.length <= kCoopMaxInventorySyncItems) {
                     coopnet_apply_companion_inventory(push);
                     coopnet_refresh_critter_fid(g_coopCompanion);
+
+                    // The inventory was replaced wholesale, so the engine never saw the
+                    // Stealth Boy being dropped and the character stayed invisible until the
+                    // next map (confirmed via testing). No Stealth Boy left -> visible again.
+                    bool hasStealthBoy = false;
+                    Inventory* pushed = &(g_coopCompanion->data.inventory);
+                    for (int i = 0; i < pushed->length; i++) {
+                        Object* held = pushed->items[i].item;
+                        if (held != NULL && (held->pid == PROTO_ID_STEALTH_BOY_I || held->pid == PROTO_ID_STEALTH_BOY_II)) {
+                            hasStealthBoy = true;
+                        }
+                    }
+                    if (!hasStealthBoy && (g_coopCompanion->flags & OBJECT_FLAG_0xFC000) != 0) {
+                        g_coopCompanion->flags &= ~OBJECT_FLAG_0xFC000;
+                        Rect stealthRect;
+                        obj_bound(g_coopCompanion, &stealthRect);
+                        tile_refresh_rect(&stealthRect, g_coopCompanion->elevation);
+                    }
                     debug_printf("\nCoop: applied INVENTORY_PUSH from client (%d items)\n", push.itemCount);
                 } else {
                     debug_printf("\nCoop: ignored INVENTORY_PUSH (companion inventory too large to replace safely)\n");
@@ -5281,6 +6038,54 @@ static void coopnet_poll_host()
 // snap. Within it, a real animated walk looks like natural movement instead
 // of a teleport.
 const int kCoopSnapDistanceThreshold = 8;
+
+// Client side: a critter that has no animation running must stand exactly on its
+// tile, in a standing pose. A walk/run that was cut short (a new command, a snap,
+// a cleared sequence) can leave it with a leftover pixel offset or a running frame,
+// which looks like the character "running off screen" until something moves it
+// again (confirmed via testing: purely visual, the tile itself was right).
+static void coopnet_client_fix_idle_visual(Object* obj)
+{
+    if (obj == NULL || FID_TYPE(obj->fid) != OBJ_TYPE_CRITTER || obj->tile == -1 || (obj->data.critter.combat.results & DAM_DEAD) != 0) {
+        return;
+    }
+    if (anim_busy(obj)) {
+        return;
+    }
+    int animType = FID_ANIM_TYPE(obj->fid);
+    bool movingPose = animType == ANIM_WALK || animType == ANIM_RUNNING;
+    if (obj->x == 0 && obj->y == 0 && !movingPose) {
+        return;
+    }
+    debug_printf("\nCoop-visual: idle pid=%d on tile %d has offset (%d,%d) anim=%d -- resetting\n", obj->pid, obj->tile, obj->x, obj->y, animType);
+    Rect rect;
+    obj_move_to_tile(obj, obj->tile, obj->elevation, &rect);
+    if (movingPose) {
+        int standFid = art_id(OBJ_TYPE_CRITTER, obj->fid & 0xFFF, ANIM_STAND, (obj->fid & 0xF000) >> 12, (obj->fid & 0x70000000) >> 28);
+        if (art_exists(standFid)) {
+            Rect fidRect;
+            obj_change_fid(obj, standFid, &fidRect);
+            rect_min_bound(&rect, &fidRect, &rect);
+        }
+    }
+    tile_refresh_rect(&rect, obj->elevation);
+}
+
+// Runs a few times a second on the client.
+static void coopnet_client_idle_visual_sweep()
+{
+    static uint32_t lastMs = 0;
+    uint32_t nowMs = coopnet_now_ms();
+    if (nowMs - lastMs < 200 || g_coopClientMapLoading || g_coopRemoteClientActive || g_coopConnState != CoopConnState::Connected) {
+        return;
+    }
+    lastMs = nowMs;
+    coopnet_client_fix_idle_visual(g_coopCompanion);
+    coopnet_client_fix_idle_visual(obj_dude);
+    for (int i = 0; i < g_coopParticipantCount; i++) {
+        coopnet_client_fix_idle_visual(g_coopParticipants[i].localObject);
+    }
+}
 
 static void coopnet_client_apply_position(const CoopPosition& pos)
 {
@@ -5371,6 +6176,32 @@ static void coopnet_client_apply_position(const CoopPosition& pos)
     // client's local isInCombat() is true sidesteps register_end()'s
     // combat branch entirely -- less smooth-looking during a fight, but
     // guaranteed to actually show up, which matters a lot more.
+    // Safety net: the host's character has stood on pos.tile for a while, yet this copy
+    // is still far away ("it runs off screen instead of standing where it should; the
+    // next click snaps it back"). Stop it and put it where the host has it.
+    {
+        static int lastHostTile[2] = { -1, -1 };
+        static uint32_t hostStillSince[2] = { 0, 0 };
+        uint32_t nowMs = coopnet_now_ms();
+        if (pos.tile != lastHostTile[pos.which]) {
+            lastHostTile[pos.which] = pos.tile;
+            hostStillSince[pos.which] = nowMs;
+        } else if (nowMs - hostStillSince[pos.which] > 2500 && (target->elevation != pos.elevation || tile_dist(target->tile, pos.tile) > 3)
+            && !g_coopClientMapLoading) {
+            debug_printf("\nCoop-run: which=%d is at %d but the host has stood on %d for %u ms (moveDest=%d lastCommanded=%d) -- putting it there\n",
+                pos.which, target->tile, pos.tile, nowMs - hostStillSince[pos.which], g_coopMoveDest[pos.which], g_coopLastCommandedTile[pos.which]);
+            register_clear_forced(target);
+            g_coopMoveDest[pos.which] = -1;
+            g_coopLastCommandedTile[pos.which] = -1;
+            Rect fixRect;
+            obj_move_to_tile(target, pos.tile, pos.elevation, &fixRect);
+            obj_set_rotation(target, pos.rotation, &fixRect);
+            tile_refresh_rect(&fixRect, pos.elevation);
+            hostStillSince[pos.which] = nowMs;
+            return;
+        }
+    }
+
     // A full-path walk/run from COOP_MSG_MOVE_ANIM is underway: let it
     // finish rather than restarting a short run toward every snapshot.
     // Falls through to the normal snap/chase logic once it arrives, times
@@ -6087,6 +6918,164 @@ static void coopnet_apply_world_item(const CoopWorldItem& msg)
     }
 }
 
+static std::vector<CoopSceneryEntry> g_coopClientSceneryList;
+static char g_coopClientSceneryMap[16] = "";
+static bool g_coopClientSceneryReady = false;
+
+static bool coopnet_same_map_name(const char* a, const char* b)
+{
+    // "DESERT1.SAV" (the host's saved copy) and "DESERT1.MAP" are the same map
+    for (int i = 0; i < 16; i++) {
+        char ca = a[i];
+        char cb = b[i];
+        bool endA = ca == '\0' || ca == '.';
+        bool endB = cb == '\0' || cb == '.';
+        if (endA || endB) {
+            return endA && endB;
+        }
+        if (toupper(static_cast<unsigned char>(ca)) != toupper(static_cast<unsigned char>(cb))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Make the client's scenery match the host's list: hide what the host does not
+// have, create what it does and the client lacks.
+static void coopnet_client_reconcile_scenery()
+{
+    std::set<uint64_t> hostKeys;
+    for (size_t i = 0; i < g_coopClientSceneryList.size(); i++) {
+        hostKeys.insert(coopnet_scenery_key(g_coopClientSceneryList[i].pid, g_coopClientSceneryList[i].tile, g_coopClientSceneryList[i].elevation));
+    }
+    std::set<uint64_t> clientKeys;
+    std::vector<Object*> toHide;
+    for (int elevation = 0; elevation < ELEVATION_COUNT; elevation++) {
+        for (Object* o = obj_find_first_at(elevation); o != NULL; o = obj_find_next_at()) {
+            if (!coopnet_is_synced_static(o) || o->tile == -1 || (o->flags & OBJECT_HIDDEN) != 0) {
+                continue;
+            }
+            uint64_t key = coopnet_scenery_key(o->pid, o->tile, elevation);
+            clientKeys.insert(key);
+            if (hostKeys.find(key) == hostKeys.end()) {
+                toHide.push_back(o);
+            }
+        }
+    }
+    for (size_t i = 0; i < toHide.size(); i++) {
+        coopnet_set_static_hidden(toHide[i], true);
+    }
+    int created = 0;
+    for (size_t i = 0; i < g_coopClientSceneryList.size(); i++) {
+        const CoopSceneryEntry& e = g_coopClientSceneryList[i];
+        if (clientKeys.find(coopnet_scenery_key(e.pid, e.tile, e.elevation)) != clientKeys.end()
+            || !elevationIsValid(e.elevation) || !hexGridTileIsValid(e.tile) || (PID_TYPE(e.pid) != OBJ_TYPE_SCENERY && PID_TYPE(e.pid) != OBJ_TYPE_ITEM)) {
+            continue;
+        }
+        Object* made = NULL;
+        if (obj_pid_new(&made, e.pid) == -1 || made == NULL) {
+            continue;
+        }
+        Rect rect;
+        obj_move_to_tile(made, e.tile, e.elevation, &rect);
+        created++;
+    }
+    debug_printf("\nCoop: scenery matched to the host's: %d hidden, %d added (host has %d)\n",
+        static_cast<int>(toHide.size()), created, static_cast<int>(g_coopClientSceneryList.size()));
+    tile_refresh_display();
+}
+
+// Run the reconcile once the client has loaded the very map the list is for.
+static void coopnet_client_try_scenery()
+{
+    if (!g_coopClientSceneryReady || g_coopClientMapLoading || g_coopRemoteClientActive) {
+        return;
+    }
+    if (!coopnet_same_map_name(g_coopClientSceneryMap, map_data.name)) {
+        return;
+    }
+    g_coopClientSceneryReady = false;
+    coopnet_client_reconcile_scenery();
+}
+
+static void coopnet_client_scenery_delta(const unsigned char* payload, int payloadLen)
+{
+    if (payloadLen < static_cast<int>(sizeof(CoopSceneryDeltaHeader))) {
+        return;
+    }
+    CoopSceneryDeltaHeader head;
+    memcpy(&head, payload, sizeof(head));
+    if (payloadLen != static_cast<int>(sizeof(head) + head.count * sizeof(CoopSceneryEntry))) {
+        return;
+    }
+    // only for the map we are on (a delta for another map must not touch this one)
+    if (g_coopClientMapLoading || !coopnet_same_map_name(head.map, map_data.name)) {
+        return;
+    }
+    const CoopSceneryEntry* entries = reinterpret_cast<const CoopSceneryEntry*>(payload + sizeof(head));
+    for (int i = 0; i < head.count; i++) {
+        const CoopSceneryEntry& e = entries[i];
+        if (!elevationIsValid(e.elevation) || !hexGridTileIsValid(e.tile)) {
+            continue;
+        }
+        Object* visible = NULL;
+        Object* hidden = NULL;
+        for (Object* o = obj_find_first_at(e.elevation); o != NULL; o = obj_find_next_at()) {
+            if (o->tile == e.tile && o->pid == e.pid && coopnet_is_synced_static(o)) {
+                if ((o->flags & OBJECT_HIDDEN) != 0) {
+                    hidden = o;
+                } else {
+                    visible = o;
+                }
+            }
+        }
+        if (head.add) {
+            if (visible != NULL) {
+                continue;
+            }
+            if (hidden != NULL) {
+                coopnet_set_static_hidden(hidden, false);
+            } else {
+                Object* made = NULL;
+                if (obj_pid_new(&made, e.pid) != -1 && made != NULL) {
+                    Rect rect;
+                    obj_move_to_tile(made, e.tile, e.elevation, &rect);
+                }
+            }
+        } else if (visible != NULL) {
+            coopnet_set_static_hidden(visible, true);
+        }
+    }
+    tile_refresh_display();
+}
+
+static void coopnet_client_scenery_chunk(const unsigned char* payload, int payloadLen)
+{
+    if (payloadLen < static_cast<int>(sizeof(CoopSceneryListHeader))) {
+        return;
+    }
+    CoopSceneryListHeader head;
+    memcpy(&head, payload, sizeof(head));
+    if (payloadLen != static_cast<int>(sizeof(head) + head.count * sizeof(CoopSceneryEntry))) {
+        return;
+    }
+    if (head.first) {
+        g_coopClientSceneryList.clear();
+        g_coopClientSceneryReady = false;
+    }
+    size_t before = g_coopClientSceneryList.size();
+    g_coopClientSceneryList.resize(before + head.count);
+    if (head.count > 0) {
+        memcpy(&g_coopClientSceneryList[before], payload + sizeof(head), head.count * sizeof(CoopSceneryEntry));
+    }
+    if (head.last) {
+        memcpy(g_coopClientSceneryMap, head.map, sizeof(g_coopClientSceneryMap));
+        g_coopClientSceneryMap[sizeof(g_coopClientSceneryMap) - 1] = '\0';
+        g_coopClientSceneryReady = true;
+        coopnet_client_try_scenery();
+    }
+}
+
 // Client-side only: applies a COOP_MSG_MAP_TRANSITION. The host is the sole
 // authority on when a transition happens (see object.cc's obj_move_to_tile()
 // client-role guard and coopnet_host_check_map_transition()'s comment) -- this
@@ -6245,6 +7234,9 @@ static void coopnet_client_apply_map_transition(const CoopMapTransition& transit
 
     g_coopLastCommandedTile[0] = -1;
     g_coopLastCommandedTile[1] = -1;
+
+    // the host's scenery list may already be waiting for this map
+    coopnet_client_try_scenery();
 }
 
 // Client-side only: a small, always-on-top, non-modal window mirroring the
@@ -6518,6 +7510,21 @@ static void coopnet_client_combat_turn_ui_end()
 static void coopnet_poll_client()
 {
     coopnet_protect_companion_item_scripts();
+    coopnet_client_idle_visual_sweep();
+
+    // The host started a cutscene: play the same one here. It is started from this
+    // spot, not from inside the message handler, because the movie runs its own loop
+    // that calls coopnet_poll() again.
+    if (g_coopClientMoviePending && !g_coopClientPlayingHostMovie && g_coopClientHostMovieActive
+        && g_coopConnState == CoopConnState::Connected && g_coopMovieDepth == 0) {
+        g_coopClientMoviePending = false;
+        g_coopClientPlayingHostMovie = true;
+        debug_printf("\nCoop: playing the host's cutscene (movie %d) here too\n", g_coopClientMovieId);
+        gmovie_play(g_coopClientMovieId, g_coopClientMovieFlags);
+        g_coopClientPlayingHostMovie = false;
+        win_refresh_all(&scr_size);
+        tile_refresh_display();
+    }
 
     if (g_coopConnState == CoopConnState::Connecting) {
         fd_set writeSet;
@@ -6787,6 +7794,42 @@ static void coopnet_poll_client()
                 CoopRemoteTile remoteTile;
                 memcpy(&remoteTile, payload, sizeof(remoteTile));
                 coopnet_remote_client_tile(remoteTile);
+            } else if (type == COOP_MSG_REMOTE_TILEZ && payloadLen >= sizeof(CoopRemoteTileZHeader)) {
+                CoopRemoteTileZHeader head;
+                memcpy(&head, payload, sizeof(head));
+                CoopRemoteTile unpacked;
+                unpacked.tx = head.tx;
+                unpacked.ty = head.ty;
+                if (payloadLen == sizeof(head) + head.size
+                    && coopnet_lz_decompress(payload + sizeof(head), head.size, unpacked.pixels, sizeof(unpacked.pixels))) {
+                    coopnet_remote_client_tile(unpacked);
+                }
+            } else if (type == COOP_MSG_REMOTE_COPY && payloadLen == sizeof(CoopRemoteCopy)) {
+                CoopRemoteCopy order;
+                memcpy(&order, payload, sizeof(order));
+                coopnet_remote_client_copy(order);
+            } else if (type == COOP_MSG_MOVIE_PLAY && payloadLen == 2 * sizeof(int32_t)) {
+                int32_t message[2];
+                memcpy(message, payload, sizeof(message));
+                g_coopClientHostMovieActive = true;
+                if (!g_coopClientPlayingHostMovie) {
+                    g_coopClientMoviePending = true;
+                    g_coopClientMovieId = message[0];
+                    g_coopClientMovieFlags = message[1];
+                }
+            } else if (type == COOP_MSG_MOVIE_STOP) {
+                g_coopClientHostMovieActive = false;
+                g_coopClientMoviePending = false;
+            } else if (type == COOP_MSG_SCENERY_DELTA) {
+                coopnet_client_scenery_delta(payload, payloadLen);
+            } else if (type == COOP_MSG_SCENERY_LIST) {
+                coopnet_client_scenery_chunk(payload, payloadLen);
+            } else if (type == COOP_MSG_REMOTE_CURSOR) {
+                coopnet_remote_client_cursor_piece(payload, payloadLen);
+            } else if (type == COOP_MSG_REMOTE_FRAME_END) {
+                coopnet_remote_client_frame_end();
+            } else if (type == COOP_MSG_REMOTE_PAUSE && payloadLen == 1) {
+                g_coopRemoteClientPaused = payload[0] != 0;
             } else if (type == COOP_MSG_REMOTE_PALETTE && payloadLen == sizeof(CoopRemotePalette)) {
                 CoopRemotePalette remotePal;
                 memcpy(&remotePal, payload, sizeof(remotePal));
@@ -7068,6 +8111,7 @@ static void coopnet_poll_client()
                 coopnet_client_combat_turn_ui_end();
 
                 debug_printf("\nCoop: received GAME_OVER (reason=%d)\n", gameOver.reason);
+                coopnet_remote_client_abort();
 
                 // Same real death cutscene/narration obj_dude's own death
                 // triggers on the host -- requested directly: both players
@@ -7125,6 +8169,101 @@ static void coopnet_memory_mb(unsigned long long* workingSet, unsigned long long
 #endif
 }
 
+int coopnet_net_quality(int* rttMs)
+{
+    *rttMs = -1;
+    if (g_coopConnState != CoopConnState::Connected) {
+        return -1;
+    }
+    if (g_coopLastPongMs == 0) {
+        // nothing measured yet: if the peer has been silent for long it is not "just starting"
+        return coopnet_now_ms() - g_coopLastPingMs > 15000 && g_coopLastPingMs != 0 ? 3 : -2;
+    }
+    uint32_t silent = coopnet_now_ms() - g_coopLastPongMs;
+    if (silent > 15000) {
+        return 3; // no answer for fifteen seconds: really gone
+    }
+    if (silent > 4000) {
+        return 4; // quiet for a few seconds: the other game is busy (a map or save is loading)
+    }
+    *rttMs = static_cast<int>(g_coopRttMs + 0.5f);
+    // A stalled answer (a slow frame on the other PC, a lagging line) counts as lag too.
+    int effective = *rttMs;
+    if (silent > 1500 && static_cast<int>(silent) > effective) {
+        effective = static_cast<int>(silent);
+    }
+    if (effective < 60) {
+        return 0;
+    }
+    if (effective < 150) {
+        return 1;
+    }
+    if (effective < 300) {
+        return 2;
+    }
+    return 3;
+}
+
+void coopnet_keepalive()
+{
+    if (g_coopConnState != CoopConnState::Connected || g_coopPeerSocket == COOP_INVALID_SOCKET) {
+        return;
+    }
+    static uint32_t lastRun = 0;
+    uint32_t now = coopnet_now_ms();
+    if (now - lastRun < 100) {
+        return;
+    }
+    lastRun = now;
+
+    // take in what has arrived (it stays in the same buffer the normal reader uses)
+    int space = static_cast<int>(sizeof(g_coopRecvBuffer)) - g_coopRecvBufferLen;
+    if (space > 0) {
+        int rc = recv(g_coopPeerSocket, reinterpret_cast<char*>(g_coopRecvBuffer) + g_coopRecvBufferLen, space, 0);
+        if (rc > 0) {
+            g_coopRecvBufferLen += rc;
+        } else if (rc == 0) {
+            g_coopPeerClosed = true;
+            return;
+        } else if (!coopnet_would_block()) {
+            g_coopPeerClosed = true;
+            return;
+        }
+    }
+
+    // answer pings and read pongs wherever they are in the buffer; leave the rest alone
+    int pos = 0;
+    while (pos + static_cast<int>(sizeof(CoopMsgHeader)) <= g_coopRecvBufferLen) {
+        CoopMsgHeader header;
+        memcpy(&header, g_coopRecvBuffer + pos, sizeof(header));
+        int total = static_cast<int>(sizeof(header)) + header.length;
+        if (pos + total > g_coopRecvBufferLen) {
+            break;
+        }
+        if ((header.type == COOP_MSG_PING || header.type == COOP_MSG_PONG) && header.length == 4) {
+            uint32_t stamp;
+            memcpy(&stamp, g_coopRecvBuffer + pos + sizeof(header), 4);
+            if (header.type == COOP_MSG_PING) {
+                coopnet_send_droppable(g_coopPeerSocket, COOP_MSG_PONG, &stamp, 4);
+            } else {
+                float rtt = static_cast<float>(now - stamp);
+                g_coopRttMs = g_coopRttMs < 0.0f ? rtt : g_coopRttMs * 0.7f + rtt * 0.3f;
+                g_coopLastPongMs = now;
+                g_coopRttSamples++;
+            }
+            memmove(g_coopRecvBuffer + pos, g_coopRecvBuffer + pos + total, g_coopRecvBufferLen - pos - total);
+            g_coopRecvBufferLen -= total;
+        } else {
+            pos += total;
+        }
+    }
+
+    if (now - g_coopLastPingMs >= 1000) {
+        g_coopLastPingMs = now;
+        coopnet_send_droppable(g_coopPeerSocket, COOP_MSG_PING, &now, 4);
+    }
+}
+
 static void coopnet_net_stats_tick()
 {
     static uint32_t lastPollMs = 0;
@@ -7134,10 +8273,19 @@ static void coopnet_net_stats_tick()
         lastPollMs = 0;
         lastLogMs = 0;
         g_coopNetStatsLastRecvMs = 0;
+        g_coopRttMs = -1.0f;
+        g_coopLastPongMs = 0;
+        g_coopLastPingMs = 0;
+        g_coopRttSamples = 0;
         return;
     }
 
     uint32_t now = coopnet_now_ms();
+    if (now - g_coopLastPingMs >= 1000) {
+        g_coopLastPingMs = now;
+        coopnet_send_droppable(g_coopPeerSocket, COOP_MSG_PING, &now, 4);
+        coopnet_host_scenery_delta_tick();
+    }
     if (lastPollMs != 0 && now - lastPollMs > g_coopNetStats.maxPollGapMs) {
         g_coopNetStats.maxPollGapMs = now - lastPollMs;
     }
@@ -7179,8 +8327,8 @@ static void coopnet_net_stats_tick()
     unsigned long long memWorking = 0;
     unsigned long long memPrivate = 0;
     coopnet_memory_mb(&memWorking, &memPrivate);
-    debug_printf("\nCoop-net: %us window: memory %llu MB (private %llu MB); sent %u msgs / %u B (dropped %u, failed %u, blocked %u ms), recv %u msgs / %u B, max recv gap %u ms, max poll gap %u ms, backlog %d B; top sent types [%s] recv types [%s]\n",
-        (unsigned)((now - lastLogMs) / 1000), memWorking, memPrivate,
+    debug_printf("\nCoop-net: %us window: %d fps, ping %d ms; memory %llu MB (private %llu MB); sent %u msgs / %u B (dropped %u, failed %u, blocked %u ms), recv %u msgs / %u B, max recv gap %u ms, max poll gap %u ms, backlog %d B; top sent types [%s] recv types [%s]\n",
+        (unsigned)((now - lastLogMs) / 1000), svga_frames_presented_and_reset(now - lastLogMs), static_cast<int>(g_coopRttMs), memWorking, memPrivate,
         g_coopNetStats.sentMsgs, g_coopNetStats.sentBytes, g_coopNetStats.dropped, g_coopNetStats.failed, g_coopNetStats.blockedMs,
         g_coopNetStats.recvMsgs, g_coopNetStats.recvBytes, g_coopNetStats.maxRecvGapMs, g_coopNetStats.maxPollGapMs,
         g_coopRecvBufferLen, sentTop, recvTop);
@@ -7607,6 +8755,7 @@ void coopnet_on_character_screen_closed()
 
 void coopnet_on_game_reset()
 {
+    coopnet_remote_client_abort();
     if (g_coopCompanion != NULL) {
         coopnet_destroy_companion(g_coopCompanion);
         g_coopCompanion = NULL;
@@ -7617,8 +8766,19 @@ void coopnet_on_game_reset()
     g_coopParticipantStampDude = NULL;
 }
 
+// Set when a client's game ends (death, quit to menu): loading a save then joins the
+// same host again by itself, as it did before the session was ended on purpose.
+static bool g_coopAutoRejoin = false;
+
 void coopnet_on_game_loaded()
 {
+    if (g_coopAutoRejoin && g_coopRole == CoopRole::None && g_coopClientIp[0] != 0) {
+        g_coopAutoRejoin = false;
+        char rejoinIp[64];
+        snprintf(rejoinIp, sizeof(rejoinIp), "%s", g_coopClientIp);
+        debug_printf("\nCoop: rejoining %s after loading a save\n", rejoinIp);
+        coopnet_start_client(rejoinIp, g_coopClientPort);
+    }
     g_coopParticipantCount = 0;
     g_coopParticipantStampDude = NULL;
     g_coopPendingSfx.clear();
@@ -7890,6 +9050,20 @@ void coopnet_notify_combat_end()
 {
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected) {
         return;
+    }
+
+    // The client's character was knocked down in the fight and the fight ended before
+    // its next turn: nothing ever stood it up again. On the host it lay there as a body
+    // that could be looted, while the client's own screen showed it standing. Get it up.
+    if (g_coopCompanion != NULL && (g_coopCompanion->data.critter.combat.results & DAM_DEAD) == 0
+        && ((g_coopCompanion->data.critter.combat.results & (DAM_KNOCKED_DOWN | DAM_KNOCKED_OUT)) != 0 || critter_is_prone(g_coopCompanion))) {
+        debug_printf("\nCoop: the companion was still down at the end of combat -- standing it up\n");
+        bool wasProne = critter_is_prone(g_coopCompanion);
+        g_coopCompanion->data.critter.combat.results &= ~(DAM_KNOCKED_DOWN | DAM_KNOCKED_OUT);
+        if (wasProne) {
+            register_clear(g_coopCompanion);
+            dude_standup(g_coopCompanion);
+        }
     }
 
     bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_COMBAT_END, NULL, 0);
@@ -9560,6 +10734,9 @@ void coopnet_main_menu_join_begin()
 
 void coopnet_end_session()
 {
+    if (g_coopRole == CoopRole::Client) {
+        g_coopAutoRejoin = true;
+    }
     coopnet_stop_session();
 }
 

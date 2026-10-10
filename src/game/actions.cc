@@ -987,6 +987,31 @@ static int is_next_to(Object* a1, Object* a2)
     return 0;
 }
 
+// Coop: the one-off reach/use gestures (door, pickup, container, skill) are replayed on the
+// client when the host's character actually reaches the object and starts them, not
+// when the walk is queued -- announcing them at queue time made the client play the
+// gesture where the walk began and cancel its own run (no door or pickup animation).
+static int coop_gesture_ground_started(Object* critter, Object* target)
+{
+    coopnet_notify_object_anim(critter, ANIM_MAGIC_HANDS_GROUND, target != NULL ? target->tile : -1);
+    return 0;
+}
+
+static int coop_gesture_middle_started(Object* critter, Object* target)
+{
+    coopnet_notify_object_anim(critter, ANIM_MAGIC_HANDS_MIDDLE, target != NULL ? target->tile : -1);
+    return 0;
+}
+
+static void coop_notify_gesture_when_played(Object* critter, Object* target, int anim)
+{
+    if (anim == ANIM_MAGIC_HANDS_GROUND) {
+        register_object_call(critter, target, (AnimationCallback*)coop_gesture_ground_started, -1);
+    } else if (anim == ANIM_MAGIC_HANDS_MIDDLE) {
+        register_object_call(critter, target, (AnimationCallback*)coop_gesture_middle_started, -1);
+    }
+}
+
 // Coop: runs inside the climb sequence right before the climb animation, so the
 // client replays the climb at the moment the host's character starts it.
 static int coop_ladder_climb_started(Object* climber, Object* ladder)
@@ -1125,7 +1150,7 @@ int a_use_obj(Object* a1, Object* a2, Object* a3)
     // and action_use_an_item_on_object() funnel through, and this is the
     // exact anim code it's about to play locally. No-op unless a1 is the
     // companion or obj_dude -- see coopnet_notify_object_anim()'s comment.
-    coopnet_notify_object_anim(a1, anim);
+    coop_notify_gesture_when_played(a1, a2, anim);
 
     register_object_animate(a1, anim, -1);
 
@@ -1197,7 +1222,7 @@ int action_get_an_object(Object* critter, Object* item)
         // Coop: mirrors the companion's/obj_dude's pickup gesture to the
         // client. No-op unless critter is the companion or obj_dude -- see
         // coopnet_notify_object_anim()'s comment.
-        coopnet_notify_object_anim(critter, ANIM_MAGIC_HANDS_GROUND);
+        coop_notify_gesture_when_played(critter, item, ANIM_MAGIC_HANDS_GROUND);
 
         register_object_animate(critter, ANIM_MAGIC_HANDS_GROUND, 0);
 
@@ -1235,7 +1260,7 @@ int action_get_an_object(Object* critter, Object* item)
         // Coop: mirrors the companion's/obj_dude's container-open gesture
         // to the client. No-op unless critter is the companion or obj_dude
         // -- see coopnet_notify_object_anim()'s comment.
-        coopnet_notify_object_anim(critter, anim);
+        coop_notify_gesture_when_played(critter, item, anim);
 
         register_object_animate(critter, anim, 0);
 
@@ -1445,7 +1470,7 @@ int action_use_skill_on(Object* a1, Object* a2, int skill)
     // the single function all of those funnel through. No-op unless a1 is
     // the companion or obj_dude -- see coopnet_notify_object_anim()'s
     // comment.
-    coopnet_notify_object_anim(a1, anim);
+    coop_notify_gesture_when_played(a1, a2, anim);
 
     int fid = art_id(OBJ_TYPE_CRITTER, a1->fid & 0xFFF, anim, 0, a1->rotation + 1);
 

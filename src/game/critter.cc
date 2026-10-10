@@ -716,6 +716,15 @@ int critter_heal_hours(Object* critter, int hours)
 // 0x428220
 void critter_kill(Object* critter, int anim, bool refresh_window)
 {
+    // Coop: on the client both player characters are copies of the host's world; their
+    // real death (radiation in the Glow, a script) is decided on the host, which then
+    // sends GAME_OVER. Killing the copy here quit the client to the menu by itself while
+    // the host played on.
+    if (coopnet_get_role() == CoopRole::Client && coopnet_is_connected()
+        && (critter == obj_dude || critter == coopnet_get_companion())) {
+        return;
+    }
+
     int elevation = critter->elevation;
 
     partyMemberRemove(critter);

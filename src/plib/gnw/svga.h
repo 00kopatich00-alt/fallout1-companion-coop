@@ -34,6 +34,9 @@ int svga_scaling_mode();
 void svga_toggle_fps_overlay();
 bool svga_fps_overlay_enabled();
 
+// Frames shown since the last call, as a rate over `elapsedMs` (for the debug log).
+int svga_frames_presented_and_reset(unsigned int elapsedMs);
+
 } // namespace fallout
 
 #endif /* FALLOUT_PLIB_GNW_SVGA_H_ */

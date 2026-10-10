@@ -523,8 +523,21 @@ void coopnet_notify_object_anim(Object* obj, int anim, int faceTile);
 // event that started the movie, and both games hung. While a movie plays the
 // host does not announce map changes and the client holds them back; the held
 // one is applied by coopnet_movie_end().
-void coopnet_movie_begin();
+void coopnet_movie_begin(int movie, int flags);
 void coopnet_movie_end();
+
+// Client: true while a cutscene the HOST started is playing on this PC and the host's
+// has since ended -- the client's copy then stops too, so both finish together.
+bool coopnet_client_movie_should_stop();
+
+// How good the connection to the other player is right now, for the F11 overlay.
+// Returns -1 = no co-op connection (show nothing), -2 = connected but not measured
+// yet, 0 good, 1 ok, 2 poor, 3 bad. *rttMs gets the round-trip time (-1 = unknown).
+int coopnet_net_quality(int* rttMs);
+
+// Called from the input loop (every menu and screen): answers the peer's pings and
+// sends our own while the game is busy in a screen that does not poll the network.
+void coopnet_keepalive();
 
 // Host-side only, called from worldmap.cc when the host opens/closes the
 // world map screen, and periodically (every loop iteration -- internally

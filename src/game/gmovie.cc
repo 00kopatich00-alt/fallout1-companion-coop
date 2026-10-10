@@ -187,7 +187,7 @@ int gmovie_play(int game_movie, int game_movie_flags)
     moviefx_start(movieFilePath);
 
     // Coop: no map changes are announced or applied while the cutscene plays.
-    coopnet_movie_begin();
+    coopnet_movie_begin(game_movie, game_movie_flags);
 
     movieRun(win, movieFilePath);
 
@@ -205,7 +205,7 @@ int gmovie_play(int game_movie, int game_movie_flags)
         // long-running blocking screen already needed this same fix.
         coopnet_poll();
 
-        if (!moviePlaying() || game_user_wants_to_quit || get_input() != -1) {
+        if (!moviePlaying() || game_user_wants_to_quit || coopnet_client_movie_should_stop() || get_input() != -1) {
             break;
         }
 
