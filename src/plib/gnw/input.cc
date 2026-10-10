@@ -216,6 +216,11 @@ void process_bk()
 {
     int v1;
 
+    // Coop: menus (save/load, options, inventory...) run their own loops that never
+    // reach the network code, so the other player's pings went unanswered and the
+    // connection looked dead. This only answers pings; everything else stays queued.
+    coopnet_keepalive();
+
     GNW_do_bk_process();
 
     if (vcr_update() != 3) {

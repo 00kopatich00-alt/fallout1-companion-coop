@@ -557,6 +557,12 @@ void setOverlay(const uint32_t* argb, int width, int height)
 
     gl_ActiveTexture(GL_TEXTURE0 + kUnitOverlay);
     glBindTexture(GL_TEXTURE_2D, g_texOverlay);
+    // SDL's own renderer leaves its row length / alignment set after it uploads a
+    // texture; inheriting that skewed this picture ("visual error when I change the
+    // graphics mode"). Put every unpack setting to a known value first.
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+    glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_BGRA, GL_UNSIGNED_BYTE, argb);
     gl_ActiveTexture(GL_TEXTURE0);

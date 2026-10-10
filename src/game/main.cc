@@ -143,6 +143,7 @@ int gnw_main(int argc, char** argv)
                     main_load_new(mainMap);
                     main_game_loop();
                     palette_fade_to(white_palette);
+                    coopnet_end_session();
 
                     // NOTE: Uninline.
                     main_unload_new();
@@ -209,6 +210,10 @@ int gnw_main(int argc, char** argv)
                         main_game_loop();
                     }
                     palette_fade_to(white_palette);
+                    // The game ended (death, quit): leave the co-op session now. A client
+                    // sitting in the death scene / main menu does not read the network,
+                    // and the host used to freeze waiting for it.
+                    coopnet_end_session();
                     if (win != -1) {
                         win_delete(win);
                     }
@@ -379,7 +384,8 @@ static void main_game_loop()
             main_game_paused = 0;
         }
 
-        if ((obj_dude->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) != 0) {
+        bool coopClientMirror = coopnet_get_role() == CoopRole::Client && coopnet_is_connected();
+        if (!coopClientMirror && (obj_dude->data.critter.combat.results & (DAM_DEAD | DAM_KNOCKED_OUT)) != 0) {
             // Coop: only ever meaningfully true on the host -- the client's
             // own obj_dude is a pure position mirror (see
             // coopnet_client_apply_position()'s comment) that nothing ever

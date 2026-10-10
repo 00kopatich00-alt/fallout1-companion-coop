@@ -386,8 +386,9 @@ static int GNW_text_width(const char* str)
     len = 0;
 
     for (i = 0; str[i] != '\0'; i++) {
-        if (str[i] < curr_font->num) {
-            fi = &(curr_font->info[str[i]]);
+        unsigned char ch = static_cast<unsigned char>(str[i]); // cp1251 text has chars above 127
+        if (ch < curr_font->num) {
+            fi = &(curr_font->info[ch]);
             len += curr_font->spacing + fi->width;
         }
     }
@@ -398,7 +399,7 @@ static int GNW_text_width(const char* str)
 // 0x4C1C64
 static int GNW_text_char_width(char c)
 {
-    return curr_font->info[c].width;
+    return curr_font->info[static_cast<unsigned char>(c)].width;
 }
 
 // 0x4C1C78

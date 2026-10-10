@@ -330,7 +330,17 @@ static unsigned char* toggleButtonDown;
 static unsigned char* endTurnButtonDown;
 
 // 0x595700
-static unsigned char itemButtonDown[188 * 67];
+// Coop: padded -- a crash dump showed the pointer variables stored next to this buffer overwritten
+// with picture bytes (itemButtonDisabled), so something draws past its end. The padding keeps
+// that from corrupting them; the real copy size stays kItemButtonSize.
+static const int kItemButtonSize = 188 * 67;
+struct ItemButtonBuffer {
+    unsigned char before[4096];
+    unsigned char data[188 * 67];
+    unsigned char after[4096];
+};
+static ItemButtonBuffer itemButtonDownBuffer;
+#define itemButtonDown (itemButtonDownBuffer.data)
 
 // 0x5956DC
 static unsigned char* endTurnButtonUp;
@@ -366,7 +376,8 @@ static unsigned char* pipboyButtonDown;
 static unsigned char* automapButtonMask;
 
 // 0x59883C
-static unsigned char itemButtonUp[188 * 67];
+static ItemButtonBuffer itemButtonUpBuffer;
+#define itemButtonUp (itemButtonUpBuffer.data)
 
 // 0x59B990
 static unsigned char* automapButtonUp;
@@ -613,8 +624,8 @@ int intface_init()
         return intface_fatal_error(-1);
     }
 
-    memcpy(itemButtonUp, itemButtonUpBlank, sizeof(itemButtonUp));
-    memcpy(itemButtonDown, itemButtonDownBlank, sizeof(itemButtonDown));
+    memcpy(itemButtonUp, itemButtonUpBlank, kItemButtonSize);
+    memcpy(itemButtonDown, itemButtonDownBlank, kItemButtonSize);
 
     itemButton = win_register_button(interfaceWindow, 267, 26, 188, 67, -1, -1, -1, -20, itemButtonUp, itemButtonDown, NULL, BUTTON_FLAG_TRANSPARENT);
     if (itemButton == -1) {
@@ -1775,8 +1786,8 @@ static int intface_redraw_items()
     int actionPoints = -1;
 
     if (itemState->isDisabled == 0) {
-        memcpy(itemButtonUp, itemButtonUpBlank, sizeof(itemButtonUp));
-        memcpy(itemButtonDown, itemButtonDownBlank, sizeof(itemButtonDown));
+        memcpy(itemButtonUp, itemButtonUpBlank, kItemButtonSize);
+        memcpy(itemButtonDown, itemButtonDownBlank, kItemButtonSize);
 
         if (itemState->isWeapon == 0) {
             int fid;
@@ -1941,8 +1952,8 @@ static int intface_redraw_items()
             }
         }
     } else {
-        memcpy(itemButtonUp, itemButtonDisabled, sizeof(itemButtonUp));
-        memcpy(itemButtonDown, itemButtonDisabled, sizeof(itemButtonDown));
+        memcpy(itemButtonUp, itemButtonDisabled, kItemButtonSize);
+        memcpy(itemButtonDown, itemButtonDisabled, kItemButtonSize);
     }
 
     if (itemState->itemFid != -1) {
@@ -1952,6 +1963,9 @@ static int intface_redraw_items()
             int width = art_frame_width(itemFrm, 0, 0);
             int height = art_frame_length(itemFrm, 0, 0);
             unsigned char* data = art_frame_data(itemFrm, 0, 0);
+            if (width > 188 || height > 67) {
+                debug_printf("\nCoop-ui: item art fid=%d is %dx%d, bigger than the 188x67 item button\n", itemState->itemFid, width, height);
+            }
 
             int v46 = (188 - width) / 2;
             int v47 = (67 - height) / 2 - 2;

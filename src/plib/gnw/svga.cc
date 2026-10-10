@@ -554,7 +554,9 @@ static const FpsGlyph kFpsGlyphs[] = {
     { 'S', { 7, 4, 7, 1, 7 } }, { 'M', { 5, 7, 7, 5, 5 } }, { 'O', { 7, 5, 5, 5, 7 } },
     { 'D', { 6, 5, 5, 5, 6 } }, { 'E', { 7, 4, 7, 4, 7 } }, { 'G', { 7, 4, 5, 5, 7 } },
     { 'U', { 5, 5, 5, 5, 7 } }, { 'B', { 6, 5, 6, 5, 6 } }, { 'C', { 7, 4, 4, 4, 7 } },
-    { 'L', { 4, 4, 4, 4, 7 } },
+    { 'L', { 4, 4, 4, 4, 7 } }, { 'N', { 7, 5, 5, 5, 5 } }, { 'T', { 7, 2, 2, 2, 2 } },
+    { 'K', { 5, 5, 6, 5, 5 } }, { 'R', { 6, 5, 6, 5, 5 } }, { 'A', { 2, 5, 7, 5, 5 } },
+    { '-', { 0, 0, 7, 0, 0 } }, { '.', { 0, 0, 0, 0, 2 } },
 };
 
 static int gFpsOverlayWidth = 0;
@@ -576,7 +578,40 @@ static void buildFpsOverlay(int fps)
     char text[96];
     snprintf(text, sizeof(text), "FPS %d  MODE %d  %s  MEM %lluMB", fps, gScalingMode, where, memoryMb);
 
-    const int scale = 4;
+    // The connection to the other player (co-op only): quality word, ping, colour.
+    const size_t baseLength = strlen(text);
+    int netRtt = -1;
+    const int netLevel = coopnet_net_quality(&netRtt);
+    uint32_t netColor = 0xFFFFFFFFu;
+    if (netLevel != -1) {
+        char net[48];
+        if (netLevel == -2) {
+            snprintf(net, sizeof(net), "  NET ...");
+            netColor = 0xFFB0B0B0u;
+        } else if (netLevel == 3 && netRtt < 0) {
+            snprintf(net, sizeof(net), "  NET LOST");
+            netColor = 0xFFFF4444u;
+        } else if (netLevel == 4) {
+            // the other game has not answered for a few seconds: usually it is loading
+            snprintf(net, sizeof(net), "  NET WAIT");
+            netColor = 0xFFFF9A33u;
+        } else {
+            static const char* const kWords[4] = { "GOOD", "OK", "POOR", "BAD" };
+            static const uint32_t kColors[4] = { 0xFF55FF55u, 0xFFFFE055u, 0xFFFF9A33u, 0xFFFF4444u };
+            snprintf(net, sizeof(net), "  NET %s %dMS", kWords[netLevel], netRtt);
+            netColor = kColors[netLevel];
+        }
+        strncat(text, net, sizeof(text) - strlen(text) - 1);
+    }
+
+    // Sized to the picture so it never runs off the screen: 2x on a 640-wide game,
+    // up to 4x on a big one.
+    int scale = gSdlTextureSurface != NULL ? gSdlTextureSurface->w / 320 : 2;
+    if (scale < 1) {
+        scale = 1;
+    } else if (scale > 4) {
+        scale = 4;
+    }
     const int cellWidth = 4 * scale;
     const int length = static_cast<int>(strlen(text));
     gFpsOverlayWidth = length * cellWidth + 2 * scale * 2;
@@ -603,7 +638,7 @@ static void buildFpsOverlay(int fps)
                     for (int dx = 0; dx < scale; dx++) {
                         const int px = 2 * scale + i * cellWidth + col * scale + dx;
                         const int py = 2 * scale + row * scale + dy;
-                        gFpsPixels[static_cast<size_t>(py) * gFpsOverlayWidth + px] = 0xFFFFFFFFu;
+                        gFpsPixels[static_cast<size_t>(py) * gFpsOverlayWidth + px] = (netLevel != -1 && static_cast<size_t>(i) >= baseLength) ? netColor : 0xFFFFFFFFu;
                     }
                 }
             }
@@ -687,8 +722,18 @@ bool svga_fps_overlay_enabled()
     return gShowFps;
 }
 
+static unsigned int gFramesPresented = 0;
+
+int svga_frames_presented_and_reset(unsigned int elapsedMs)
+{
+    unsigned int frames = gFramesPresented;
+    gFramesPresented = 0;
+    return elapsedMs > 0 ? static_cast<int>((static_cast<unsigned long long>(frames) * 1000ull) / elapsedMs) : 0;
+}
+
 void renderPresent()
 {
+    gFramesPresented++;
     // Coop remote screen: on the host, stream this frame to the driving
     // client; on the client, draw the host's screen instead of our own.
     coopnet_remote_screen_frame_hook();
