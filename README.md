@@ -5,7 +5,7 @@ This is a two-player companion coop mod built on top of [fallout1-ce](https://gi
 It's a peer-host design: the host runs the one real, authoritative simulation of the world; the client mirrors it and drives its own companion character. Whoever opens a modal screen first (a conversation, barter, looting, an elevator, the world map) drives it while the other player watches, the same pattern the [Fallout 2 coop project](https://github.com/Cahb/fallout2-ce-coop) uses.
 
 **Status: early and still rough around the edges.** Most of a normal playthrough works - walking, fighting, looting, trading, dialogue, travel, saving - but this is a solo hobby project reverse-engineering undocumented engine internals, not a polished release. Known gaps:
-- Perks that change combat (Bonus Move, Better Criticals...) don't apply to the joining player's character yet; perks that change stats or skills do.
+- Perks and traits apply to both players (v0.7); radiation and poison still only hurt the host's character, and death is shared.
 - Combat animation sync between the two screens is much better than it was but not perfect.
 - Tested on a LAN/localhost and over Radmin VPN between two machines on Windows; the macOS build is untested.
 
