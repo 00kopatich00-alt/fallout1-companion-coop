@@ -9,6 +9,8 @@ It's a peer-host design: the host runs the one real, authoritative simulation of
 - Combat animation sync between the two screens is much better than it was but not perfect.
 - Tested on a LAN/localhost and over Radmin VPN between two machines on Windows; the macOS build is untested.
 
+**Support the project:** if you enjoy the mod, you can support its development at https://www.donationalerts.com/r/copatitch
+
 ### How to play
 1. Both players need their own legally-owned copy of Fallout 1's game data (see Installation below) next to this mod's `fallout-ce.exe`. **Both must use the exact same exe** (a mismatch is refused with a clear message).
 2. **Host:** start the game (`Host.bat`), load a save, press **F9**, then **H**. The co-op screen lists the addresses to give your friend (home network, Radmin VPN...).
