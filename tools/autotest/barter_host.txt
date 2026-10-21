@@ -1,0 +1,34 @@
+# HOST: talk to Ian and open the trade screen with the TRADE button; look at it; leave.
+log host: barter with Ian
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_host
+wait_for 120000 host: friend connected
+wait 8000
+give dude 41 500
+give dude 40 5
+talk
+wait 6000
+shot h_b1_dialogue
+click 601 335
+wait 6000
+shot h_b2_barter_open
+mouse 320 200
+wait 3000
+shot h_b3_barter_still
+key esc
+wait 5000
+shot h_b4_after_barter
+key esc
+wait 4000
+shot h_b5_after_dialogue
+expect_not CRASH
+expect_not HANG
+quit

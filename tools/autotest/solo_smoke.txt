@@ -1,0 +1,26 @@
+# One game, no network: main menu -> load slot -> character screen -> back.
+log solo smoke test
+on_fail continue
+# any key skips the intro movies
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+shot 01_main_menu
+key l
+wait 2500
+shot 02_load_dialog
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+shot 03_in_game
+key c
+wait 2500
+shot 04_character_screen
+click 400 188
+wait 1000
+shot 05_science_description
+expect_not Coop-text: word_wrap overflow
+key esc
+wait 1500
+shot 06_back_in_game
+quit

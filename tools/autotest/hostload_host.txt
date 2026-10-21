@@ -1,0 +1,26 @@
+# HOST: host saves and loads in the middle of a session
+log host: host saves and loads in the middle of a session
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_host
+wait_for 120000 host: friend connected
+wait 8000
+dump_dude
+key l
+wait 2500
+key enter
+wait 25000
+shot h_after_load
+dump_dude
+log end
+wait 20000
+expect_not CRASH
+expect_not HANG
+quit

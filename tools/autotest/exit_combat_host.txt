@@ -1,0 +1,48 @@
+# HOST: a fight starts; the friend walks to an exit grid during its combat turns and must take the party to the world map.
+log host: client leaves through an exit in combat
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_host
+wait_for 120000 host: friend connected
+wait 8000
+godmode on
+spawn 16777264 6 3
+wait 2500
+start_fight
+wait_for 30000 notified peer combat began
+log fight
+wait 6000
+key space
+wait 12000
+wait 6000
+key space
+wait 12000
+wait 6000
+key space
+wait 12000
+wait 6000
+key space
+wait 12000
+wait 6000
+key space
+wait 12000
+wait 6000
+key space
+wait 12000
+wait 6000
+key space
+wait 12000
+wait 6000
+key space
+wait 12000
+wait_for 20000 notified peer combat ended
+shot h_end
+expect_not HANG
+quit

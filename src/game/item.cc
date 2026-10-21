@@ -6,6 +6,7 @@
 #include "game/anim.h"
 #include "game/automap.h"
 #include "game/combat.h"
+#include "game/coopnet.h"
 #include "game/critter.h"
 #include "game/display.h"
 #include "game/game.h"
@@ -1327,6 +1328,12 @@ int item_w_reload(Object* weapon, Object* ammo)
 
         item_w_set_curr_ammo(ammo, v11);
         item_w_set_curr_ammo(weapon, v12);
+
+        // Coop: a reload on the client changes its copy of the friend's character only; tell the host,
+        // or the host's weapon stays empty and the shots are refused ("ammunition has run out").
+        if (coopnet_get_role() == CoopRole::Client) {
+            coopnet_on_client_inventory_closed();
+        }
     }
 
     return v11;
@@ -1356,8 +1363,8 @@ int item_w_range(Object* critter, int hit_mode)
     }
 
     if (item_w_subtype(weapon, hit_mode) == ATTACK_TYPE_THROW) {
-        if (critter == obj_dude) {
-            max_range = 3 * (stat_level(critter, STAT_STRENGTH) + 2 * perk_level(PERK_HEAVE_HO));
+        if (perk_is_player(critter)) {
+            max_range = 3 * (stat_level(critter, STAT_STRENGTH) + 2 * perk_level_of(critter, PERK_HEAVE_HO));
         } else {
             max_range = 3 * stat_level(critter, STAT_STRENGTH);
         }
@@ -1396,23 +1403,23 @@ int item_w_mp_cost(Object* critter, int hit_mode, bool aiming)
             action_points = item_w_secondary_mp_cost(weapon);
         }
 
-        if (critter == obj_dude) {
-            if (trait_level(TRAIT_FAST_SHOT)) {
+        if (perk_is_player(critter)) {
+            if (trait_level_of(critter, TRAIT_FAST_SHOT)) {
                 action_points -= 1;
             }
         }
     }
 
-    if (critter == obj_dude) {
+    if (perk_is_player(critter)) {
         weapon_subtype = item_w_subtype(weapon, hit_mode);
 
-        if (perk_level(PERK_BONUS_HTH_ATTACKS)) {
+        if (perk_level_of(critter, PERK_BONUS_HTH_ATTACKS)) {
             if (weapon_subtype == ATTACK_TYPE_MELEE || weapon_subtype == ATTACK_TYPE_UNARMED) {
                 action_points -= 1;
             }
         }
 
-        if (perk_level(PERK_BONUS_RATE_OF_FIRE)) {
+        if (perk_level_of(critter, PERK_BONUS_RATE_OF_FIRE)) {
             if (weapon_subtype == ATTACK_TYPE_RANGED) {
                 action_points -= 1;
             }
@@ -1542,8 +1549,8 @@ int item_w_called_shot(Object* critter, int hit_mode)
     Object* weapon;
     int damage_type;
 
-    if (critter == obj_dude) {
-        if (trait_level(TRAIT_FAST_SHOT)) {
+    if (perk_is_player(critter)) {
+        if (trait_level_of(critter, TRAIT_FAST_SHOT)) {
             return 0;
         }
     }
@@ -2129,8 +2136,8 @@ static int insert_drug_effect(Object* critter, Object* item, int a3, int* stats,
     }
 
     int delay = 600 * a3;
-    if (critter == obj_dude) {
-        if (trait_level(TRAIT_CHEM_RESISTANT)) {
+    if (perk_is_player(critter)) {
+        if (trait_level_of(critter, TRAIT_CHEM_RESISTANT)) {
             delay /= 2;
         }
     }
@@ -2273,16 +2280,16 @@ int item_d_take_drug(Object* critter, Object* item)
 
     if (!item_d_check_addict(item->pid)) {
         addiction_chance = proto->item.data.drug.addictionChance;
-        if (critter == obj_dude) {
-            if (trait_level(TRAIT_CHEM_RELIANT)) {
+        if (perk_is_player(critter)) {
+            if (trait_level_of(critter, TRAIT_CHEM_RELIANT)) {
                 addiction_chance *= 2;
             }
 
-            if (trait_level(TRAIT_CHEM_RESISTANT)) {
+            if (trait_level_of(critter, TRAIT_CHEM_RESISTANT)) {
                 addiction_chance /= 2;
             }
 
-            if (perk_level(PERK_FLOWER_CHILD)) {
+            if (perk_level_of(critter, PERK_FLOWER_CHILD)) {
                 addiction_chance /= 2;
             }
         }
@@ -2495,12 +2502,12 @@ static void perform_withdrawal_start(Object* obj, int perk, int pid)
     }
 
     duration = 10080;
-    if (obj == obj_dude) {
-        if (trait_level(TRAIT_CHEM_RELIANT)) {
+    if (perk_is_player(obj)) {
+        if (trait_level_of(obj, TRAIT_CHEM_RELIANT)) {
             duration /= 2;
         }
 
-        if (perk_level(PERK_FLOWER_CHILD)) {
+        if (perk_level_of(obj, PERK_FLOWER_CHILD)) {
             duration /= 2;
         }
     }

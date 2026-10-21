@@ -18,6 +18,17 @@ void crash_handler_install();
 void startup_log(const char* format, ...);
 void startup_fail(const char* title_and_reason);
 
+// Coop: remembers what the game is doing right now (also written to startup.log). A crash or
+// a freeze report prints it, so "froze while joining" says at which step.
+void crash_handler_set_stage(const char* format, ...);
+
+// Coop: called every time the game polls its input; a stuck main thread is reported by the watchdog.
+void crash_handler_heartbeat();
+
+// Moves <path> to <previousPath> (replacing it) so the next launch does not overwrite the log
+// of a session that crashed.
+void log_keep_previous(const char* path, const char* previousPath);
+
 } // namespace fallout
 
 #endif /* FALLOUT_PLIB_GNW_CRASH_HANDLER_H_ */

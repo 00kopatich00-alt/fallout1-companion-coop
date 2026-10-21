@@ -1,6 +1,7 @@
 #ifndef FALLOUT_GAME_TRAIT_H_
 #define FALLOUT_GAME_TRAIT_H_
 
+#include "game/object_types.h"
 #include "plib/db/db.h"
 
 namespace fallout {
@@ -40,6 +41,11 @@ char* trait_name(int trait);
 char* trait_description(int trait);
 int trait_pic(int trait);
 int trait_level(int trait);
+
+// Coop: traits of the character the client plays (the host's companion); see perk_is_player().
+int trait_level_of(Object* critter, int trait);
+int trait_level_any(int trait);
+void trait_coop_set_companion(const int* has, int count);
 int trait_adjust_stat(int stat);
 int trait_adjust_skill(int skill);
 

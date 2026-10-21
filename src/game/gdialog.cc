@@ -1102,7 +1102,7 @@ void gdialog_display_msg(char* msg)
     replyRect.lry = 58;
 
     // NOTE: Result is unused. Looks like the intention was to change color.
-    perk_level(PERK_EMPATHY);
+    perk_level_any(PERK_EMPATHY);
 
     demo_copy_title(gReplyWin);
 
@@ -2039,7 +2039,7 @@ static void gDialogProcessHighlight(int index)
     optionRect.lrx = 388;
 
     int color = colorTable[32747] | 0x2000000;
-    if (perk_level(PERK_EMPATHY)) {
+    if (perk_level_any(PERK_EMPATHY)) {
         color = colorTable[32747] | 0x2000000;
         switch (dialogOptionEntry->reaction) {
         case GAME_DIALOG_REACTION_GOOD:
@@ -2087,7 +2087,7 @@ static void gDialogProcessUnHighlight(int index)
     gDialogRefreshOptionsRect(gOptionWin, &optionRect);
 
     int color = colorTable[992] | 0x2000000;
-    if (perk_level(PERK_EMPATHY) != 0) {
+    if (perk_level_any(PERK_EMPATHY) != 0) {
         color = colorTable[32747] | 0x2000000;
         switch (dialogOptionEntry->reaction) {
         case GAME_DIALOG_REACTION_GOOD:
@@ -2132,7 +2132,7 @@ static void gDialogProcessReply()
     replyRect.lry = 58;
 
     // NOTE: There is an unused if condition.
-    perk_level(PERK_EMPATHY);
+    perk_level_any(PERK_EMPATHY);
 
     demo_copy_title(gReplyWin);
 
@@ -2173,7 +2173,7 @@ static void gDialogProcessUpdate()
 
     int color = colorTable[992] | 0x2000000;
 
-    bool hasEmpathy = perk_level(PERK_EMPATHY) != 0;
+    bool hasEmpathy = perk_level_any(PERK_EMPATHY) != 0;
 
     int width = optionRect.lrx - optionRect.ulx - 4;
 

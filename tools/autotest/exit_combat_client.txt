@@ -1,0 +1,43 @@
+# CLIENT: in combat, walk the character to the nearest exit grid, turn after turn.
+log client: exit in combat
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_join 127.0.0.1
+wait_for 120000 client: HELLO_ACK received
+wait_for 60000 client: map
+wait 3000
+wait_for 120000 Coop: received COMBAT_BEGIN
+log fight
+wait_for 90000 myTurnActive=1
+wait 1500
+goto_exit
+wait 10000
+shot c_turn1
+key space
+wait 4000
+wait_for 90000 myTurnActive=1
+wait 1500
+goto_exit
+wait 10000
+shot c_turn2
+key space
+wait 4000
+wait_for 90000 myTurnActive=1
+wait 1500
+goto_exit
+wait 10000
+shot c_turn3
+key space
+wait 4000
+wait 20000
+shot c_end
+expect_not CRASH
+expect_not HANG
+quit

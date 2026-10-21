@@ -2,9 +2,11 @@
 
 #include <stdio.h>
 
+#include "game/coopnet.h"
 #include "game/game.h"
 #include "game/message.h"
 #include "game/object.h"
+#include "game/perk.h"
 #include "game/scripts.h"
 #include "game/skill.h"
 #include "game/stat.h"
@@ -336,6 +338,47 @@ int trait_adjust_skill(int skill)
     }
 
     return modifier;
+}
+
+} // namespace fallout
+
+namespace fallout {
+
+// Coop: the traits the client's character has (filled when it sends its character).
+static int trait_coop_has[TRAIT_COUNT];
+
+int trait_level_of(Object* critter, int trait)
+{
+    if (trait < 0 || trait >= TRAIT_COUNT || critter == NULL) {
+        return 0;
+    }
+    if (critter == obj_dude) {
+        return trait_level(trait);
+    }
+    if (coopnet_get_role() != CoopRole::None && critter == coopnet_get_companion()) {
+        // On the client's own machine the local traits already are that player's.
+        return coopnet_get_role() == CoopRole::Host ? trait_coop_has[trait] : trait_level(trait);
+    }
+    return 0;
+}
+
+// Traits that change the world for everybody (Jinxed): active if either player has them.
+int trait_level_any(int trait)
+{
+    if (trait_level(trait)) {
+        return 1;
+    }
+    if (trait >= 0 && trait < TRAIT_COUNT && coopnet_get_role() == CoopRole::Host) {
+        return trait_coop_has[trait];
+    }
+    return 0;
+}
+
+void trait_coop_set_companion(const int* has, int count)
+{
+    for (int trait = 0; trait < TRAIT_COUNT; trait++) {
+        trait_coop_has[trait] = has != NULL && trait < count ? has[trait] : 0;
+    }
 }
 
 } // namespace fallout

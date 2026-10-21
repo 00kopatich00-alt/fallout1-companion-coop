@@ -50,6 +50,7 @@ int combat_bullet_start(const Object* a1, const Object* a2);
 void compute_explosion_on_extras(Attack* attack, int a2, bool isGrenade, int a4);
 int determine_to_hit(Object* a1, Object* a2, int hitLocation, int hitMode);
 int determine_to_hit_no_range(Object* a1, Object* a2, int hitLocation, int hitMode);
+void combat_describe_to_hit(Object* attacker, Object* defender, int hitMode, char* buffer, size_t size);
 void death_checks(Attack* attack);
 void apply_damage(Attack* attack, bool animated);
 void combat_display(Attack* attack);

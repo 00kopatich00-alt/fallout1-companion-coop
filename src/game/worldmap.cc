@@ -29,6 +29,7 @@
 #include "game/options.h"
 #include "game/party.h"
 #include "game/perk.h"
+#include "game/proto.h"
 #include "game/protinst.h"
 #include "game/queue.h"
 #include "game/roll.h"
@@ -1618,7 +1619,7 @@ static int world_map_impl(WorldMapContext ctx)
                                 special_enc_chance += roll_random(1, 6);
                                 special_enc_chance -= 5;
                                 special_enc_chance += stat_level(obj_dude, STAT_LUCK);
-                                special_enc_chance += 2 * perk_level(PERK_EXPLORER);
+                                special_enc_chance += 2 * perk_level_any(PERK_EXPLORER);
                                 if (special_enc_chance < 18 || encounter_specials == 63) {
                                     v142 = 1;
                                     break;
@@ -2331,10 +2332,19 @@ static int world_map_impl(WorldMapContext ctx)
 // through -- see coopnet_notify_worldmap_begin()/_end()'s comment in
 // coopnet.h. No-op on the client, which never reaches this screen at all
 // (see scripts_request_worldmap()'s comment).
+static bool g_worldMapScreenOpen = false;
+
+bool world_map_screen_open()
+{
+    return g_worldMapScreenOpen;
+}
+
 int world_map(WorldMapContext ctx)
 {
     coopnet_notify_worldmap_begin();
+    g_worldMapScreenOpen = true;
     int rc = world_map_impl(ctx);
+    g_worldMapScreenOpen = false;
     coopnet_notify_worldmap_end();
     return rc;
 }
@@ -2417,7 +2427,7 @@ static void UpdVisualArea()
 
     WorldGrid[current_row][current_column] = 2;
 
-    if (perk_level(PERK_SCOUT)) {
+    if (perk_level_any(PERK_SCOUT)) {
         last_column_offset_index = 5;
         for (row_offset_index = 0; row_offset_index < 5; row_offset_index++) {
             row = current_row + scout_offsets[row_offset_index][0].row_offset;
@@ -3758,6 +3768,20 @@ static void CalcTimeAdder()
     float outdoorsman;
 
     outdoorsman = (float)skill_level(obj_dude, SKILL_OUTDOORSMAN);
+    // Coop: the party travels with the better guide of the two players (the friend's character has
+    // the skills its player chose).
+    Object* friendsCharacter = coopnet_get_companion();
+    Proto* friendsProto = NULL;
+    if (coopnet_get_role() == CoopRole::Host && friendsCharacter != NULL && friendsCharacter != obj_dude
+        && proto_ptr(friendsCharacter->pid, &friendsProto) != -1 && friendsProto != NULL) {
+        float friendsOutdoorsman = (float)skill_level(friendsCharacter, SKILL_OUTDOORSMAN);
+        debug_printf("\nCoop: travel speed: host outdoorsman %d, friend's outdoorsman %d\n", static_cast<int>(outdoorsman), static_cast<int>(friendsOutdoorsman));
+        if (friendsOutdoorsman > outdoorsman) {
+            outdoorsman = friendsOutdoorsman;
+        }
+    } else if (coopnet_get_role() == CoopRole::Host && friendsCharacter != NULL) {
+        debug_printf("\nCoop: travel speed: the friend's character (pid %d) has no stat sheet right now -- using the host's skill\n", friendsCharacter->pid);
+    }
     if (outdoorsman > 100.0f) {
         outdoorsman = 100.0f;
     }
@@ -3766,7 +3790,7 @@ static void CalcTimeAdder()
     time_adder = (unsigned int)(864000.0f / (float)wmap_day);
 
     // TODO: Check, float-double-int mess.
-    time_adder = (unsigned int)(time_adder * (1.0 - perk_level(PERK_PATHFINDER) * 0.25f));
+    time_adder = (unsigned int)(time_adder * (1.0 - perk_level_any(PERK_PATHFINDER) * 0.25f));
 }
 
 // 0x0x4AEB4C

@@ -154,6 +154,9 @@ int init_world_map();
 int save_world_map(DB_FILE* stream);
 int load_world_map(DB_FILE* stream);
 int world_map(WorldMapContext ctx);
+
+// Coop autotest: true while the world map screen is on.
+bool world_map_screen_open();
 WorldMapContext town_map(WorldMapContext ctx);
 void KillWorldWin();
 int worldmap_script_jump(int city, int a2);

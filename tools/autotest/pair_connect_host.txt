@@ -1,0 +1,27 @@
+# HOST: load a save, start hosting, wait for the client, walk a bit, leave.
+log host: connect test
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+shot h01_load_dialog
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+shot h02_in_game
+coop_host
+wait_for 120000 host: friend connected
+wait 6000
+shot h03_with_friend
+# walk right and down a few tiles
+click 420 300
+wait 4000
+shot h04_walked
+click 250 250
+wait 4000
+shot h05_walked_back
+expect_not CRASH
+expect_not HANG
+quit

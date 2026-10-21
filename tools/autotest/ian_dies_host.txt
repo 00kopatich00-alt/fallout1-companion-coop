@@ -1,0 +1,30 @@
+# HOST: friend dies in combat, the client's view of the body
+log host: friend dies in combat, the client's view of the body
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_host
+wait_for 120000 host: friend connected
+wait 8000
+spawn 16777264 6 3
+wait 2500
+start_fight
+wait_for 30000 notified peer combat began
+wait 8000
+list_dead
+list_party
+kill_party
+wait 6000
+wait 8000
+list_dead
+list_party
+shot h_after_death
+expect_not CRASH
+expect_not HANG
+quit

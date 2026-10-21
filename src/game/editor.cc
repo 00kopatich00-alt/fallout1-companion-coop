@@ -4557,7 +4557,10 @@ static int DrawCard(int graphicId, const char* name, const char* attributes, cha
 
     int descriptionFontLineHeight = text_height();
 
-    if (word_wrap(description, v9 + 136, beginnings, &beginningsCount) != 0) {
+    int wrapResult = word_wrap(description, v9 + 136, beginnings, &beginningsCount);
+    debug_printf("\nCoop-text: card '%s' description %d chars, width %d, text_max %d, word_wrap=%d, lines=%d\n",
+        name != NULL ? name : "?", description != NULL ? static_cast<int>(strlen(description)) : -1, v9 + 136, text_max(), wrapResult, static_cast<int>(beginningsCount));
+    if (wrapResult != 0) {
         // TODO: Leaking graphic handle.
         return -1;
     }

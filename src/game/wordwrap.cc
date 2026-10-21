@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "plib/gnw/debug.h"
 #include "plib/gnw/text.h"
 
 namespace fallout {
@@ -42,6 +43,12 @@ int word_wrap(const char* string, int width, short* breakpoints, short* breakpoi
             }
         } else {
             if (*breakpointsLengthPtr == WORD_WRAP_MAX_COUNT) {
+                debug_printf("\nCoop-text: word_wrap overflow: width=%d gap=%d at char index %d (code %d, width %d), breaks:", width, gap,
+                    static_cast<int>(pch - string), *pch & 0xFF, text_char_width(*pch & 0xFF));
+                for (int k = 0; k < 20; k++) {
+                    debug_printf(" %d", breakpoints[k]);
+                }
+                debug_printf("\n");
                 return -1;
             }
 

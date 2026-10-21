@@ -1,0 +1,75 @@
+# SHOWCASE (client, right window): the friend's side of the tour.
+on_fail continue
+caption Fallout 1 co-op v0.6 - CLIENT (right window)
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 5000
+key l
+wait 3500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 6000
+caption CLIENT: loads its own save (its own character) and joins the host
+coop_join 127.0.0.1
+wait_for 120000 client: HELLO_ACK received
+wait_for 60000 client: map
+wait 6000
+caption Joined: the host's world appears here
+wait 14000
+caption The client walks too
+click 400 280
+wait 5000
+click 260 240
+wait 6000
+caption NEW: the client gives its character perks and traits - the host uses them in combat
+perk bonus_ranged_damage 2
+perk sniper 1
+perk more_criticals 1
+perk action_boy 2
+perk toughness 1
+trait fast_shot finesse
+char_changed
+wait 6000
+caption Combat: the client attacks with its own character
+wait_for 120000 Coop: received COMBAT_BEGIN
+wait_for 120000 myTurnActive=1
+wait 3000
+caption Called shot: the client aims at the EYES
+aim on
+called_shot eyes
+cursor attack
+hover_enemy
+wait 2000
+click_here
+wait 8000
+aim off
+caption ...and a normal shot
+cursor attack
+hover_enemy
+wait 2000
+click_here
+wait 8000
+key space
+wait 12000
+caption Cutscenes: the client plays the host's cutscene too
+wait_for 120000 playing the host's cutscene
+wait 8000
+caption Reach animations and conversations are mirrored here
+wait 60000
+caption The shared death: the client's game ends too
+wait_for 150000 received GAME_OVER
+wait 9000
+keys space 8
+wait 12000
+key l
+wait 3500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+caption NEW: after loading a save the client rejoins by itself
+wait_for 120000 rejoining
+wait_for 60000 client: HELLO_ACK received
+wait_for 60000 client: map
+wait 10000
+list_dead
+wait 12000
+quit

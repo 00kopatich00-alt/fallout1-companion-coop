@@ -245,7 +245,10 @@ int FMtext_char_width(char c)
     if (c == ' ') {
         width = gCurrentFont->wordSpacing;
     } else {
-        width = gCurrentFont->glyphs[c].width;
+        // Coop: c is a signed char, so Cyrillic letters (code 128 and up) used to index in front
+        // of the table and return the width of whatever lay there -- 426 for a Russian "ю".
+        // word_wrap() then broke the line at every such letter and the description vanished.
+        width = gCurrentFont->glyphs[static_cast<unsigned char>(c)].width;
     }
 
     return width;

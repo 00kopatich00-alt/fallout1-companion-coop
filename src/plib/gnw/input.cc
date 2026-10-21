@@ -4,6 +4,8 @@
 #include <stdio.h>
 
 #include "audio_engine.h"
+#include "game/coop_autotest.h"
+#include "plib/gnw/crash_handler.h"
 #include "game/coopnet.h"
 #include "platform_compat.h"
 #include "plib/color/color.h"
@@ -187,7 +189,8 @@ int get_input()
 
     GNW95_process_message();
 
-    if (!GNW95_isActive) {
+    // Coop: a scripted self-test must keep running whichever window has the focus.
+    if (!GNW95_isActive && !autotest_active()) {
         GNW95_lost_focus();
     }
 
@@ -216,10 +219,13 @@ void process_bk()
 {
     int v1;
 
+    crash_handler_heartbeat();
+
     // Coop: menus (save/load, options, inventory...) run their own loops that never
     // reach the network code, so the other player's pings went unanswered and the
     // connection looked dead. This only answers pings; everything else stays queued.
     coopnet_keepalive();
+    autotest_tick();
 
     GNW_do_bk_process();
 

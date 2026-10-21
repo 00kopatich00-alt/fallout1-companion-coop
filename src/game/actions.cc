@@ -184,8 +184,8 @@ static int pick_death(Object* attacker, Object* defender, int damage, int damage
         return check_death(defender, ANIM_EXPLODED_TO_NOTHING, VIOLENCE_LEVEL_NORMAL, hit_from_front);
     }
 
-    if (attacker == obj_dude) {
-        if (trait_level(TRAIT_BLOODY_MESS)) {
+    if (perk_is_player(attacker)) {
+        if (trait_level_of(attacker, TRAIT_BLOODY_MESS)) {
             has_bloody_mess = true;
         }
     }

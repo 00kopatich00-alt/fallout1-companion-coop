@@ -1,0 +1,30 @@
+# HOST: three rats; the friend makes an aimed shot (head) and a plain shot; the host's own roll is logged to compare.
+log host: aimed shot percentages
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_host
+wait_for 120000 host: friend connected
+wait 8000
+wield companion 8 29
+give companion 40 3
+give companion 29 40
+wait 3000
+spawn 16777264 6 3
+wait 2500
+start_fight
+wait_for 30000 notified peer combat began
+# our own turn first: end it at once so the friend gets its turn
+wait 6000
+key space
+wait_for 120000 Coop-hit: host rolls
+wait 8000
+expect_not CRASH
+expect_not HANG
+quit

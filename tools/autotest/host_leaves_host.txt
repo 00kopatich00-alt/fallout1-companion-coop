@@ -1,0 +1,21 @@
+# HOST: host leaves in the middle of a fight
+log host: host leaves in the middle of a fight
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_host
+wait_for 120000 host: friend connected
+wait 8000
+spawn 16777264 6 3
+wait 2500
+start_fight
+wait_for 30000 notified peer combat began
+wait 10000
+log host quits now
+quit

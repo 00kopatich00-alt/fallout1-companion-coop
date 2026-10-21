@@ -1,0 +1,22 @@
+# HOST: the host's character is killed -> shared game over
+log host: dude death
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_host
+wait_for 120000 host: friend connected
+wait 8000
+damage dude 999
+wait_for 30000 notified peer game over
+shot h_after_dude_death
+keys space 6
+wait 8000
+expect_not CRASH
+expect_not HANG
+quit

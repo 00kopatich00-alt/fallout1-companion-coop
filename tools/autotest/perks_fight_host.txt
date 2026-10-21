@@ -1,0 +1,51 @@
+# HOST: the friend's character has perks; check they arrive, then fight three cave rats.
+log host: perks + fight test
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_host
+wait_for 120000 host: friend connected
+wait_for 60000 the friend's character has 5 perk
+wait 1500
+dump_companion
+expect Coop-stage: host: the friend's character has 5 perk
+wield companion 8 29
+give companion 40 3
+give companion 29 40
+wait 3000
+shot h01_before_fight
+spawn 16777264 6 3
+wait 2500
+shot h02_rats
+start_fight
+wait_for 30000 notified peer combat began
+log fight
+# our own turn first: switch the pointer to the attack cursor, shoot, end the turn
+wait 6000
+cursor attack
+hover_enemy
+shot h03_hover_enemy
+click_here
+wait 5000
+shot h04_shot
+cursor attack
+hover_enemy
+click_here
+wait 5000
+key space
+wait 5000
+shot h05_after_end_turn
+# the friend's turn comes now; give it time to shoot (its perks are used here)
+wait_for 120000 Coop-perk: the friend's character shoots with Bonus Ranged Damage
+wait 3000
+shot h06_friend_shot
+expect_not CRASH
+expect_not HANG
+dump_companion
+quit

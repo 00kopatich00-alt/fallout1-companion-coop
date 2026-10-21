@@ -1,0 +1,32 @@
+# HOST: starts conversations with the nearest person; the client must see them too. Screenshots show the options (find the barter one).
+log host: dialogue
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_host
+wait_for 120000 host: friend connected
+wait 8000
+talk
+wait 7000
+shot h_dialogue_start
+key 1
+wait 5000
+shot h_dialogue_option1
+key 2
+wait 5000
+shot h_dialogue_option2
+key 3
+wait 5000
+shot h_dialogue_option3
+key esc
+wait 4000
+shot h_after_dialogue
+expect_not CRASH
+expect_not HANG
+quit

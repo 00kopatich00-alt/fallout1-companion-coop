@@ -1,0 +1,202 @@
+# CLIENT: wander around for a long time
+log client: wander around for a long time
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_join 127.0.0.1
+wait_for 120000 client: HELLO_ACK received
+wait_for 60000 client: map
+wait 3000
+click 133 129
+wait 2500
+click 483 277
+wait 2500
+click 331 219 double
+wait 3500
+click 146 158
+wait 2500
+click 466 254
+wait 2500
+click 342 238 double
+wait 3500
+click 159 187
+wait 2500
+click 449 231
+wait 2500
+click 353 257 double
+wait 3500
+click 172 216
+wait 2500
+click 432 208
+wait 2500
+click 364 276 double
+wait 3500
+click 185 245
+wait 2500
+click 415 185
+wait 2500
+click 375 295 double
+wait 3500
+click 198 274
+wait 2500
+click 398 162
+wait 2500
+click 386 314 double
+wait 3500
+click 211 103
+wait 2500
+click 381 139
+wait 2500
+click 397 213 double
+wait 3500
+click 224 132
+wait 2500
+click 364 296
+wait 2500
+click 408 232 double
+wait 3500
+click 237 161
+wait 2500
+click 347 273
+wait 2500
+click 419 251 double
+wait 3500
+click 250 190
+wait 2500
+click 330 250
+wait 2500
+click 430 270 double
+wait 3500
+click 263 219
+wait 2500
+click 313 227
+wait 2500
+click 441 289 double
+wait 3500
+click 276 248
+wait 2500
+click 296 204
+wait 2500
+click 452 308 double
+wait 3500
+click 289 277
+wait 2500
+click 279 181
+wait 2500
+click 463 207 double
+wait 3500
+click 302 106
+wait 2500
+click 262 158
+wait 2500
+click 324 226 double
+wait 3500
+click 315 135
+wait 2500
+click 245 135
+wait 2500
+click 335 245 double
+wait 3500
+click 328 164
+wait 2500
+click 228 292
+wait 2500
+click 346 264 double
+wait 3500
+click 341 193
+wait 2500
+click 211 269
+wait 2500
+click 357 283 double
+wait 3500
+click 354 222
+wait 2500
+click 194 246
+wait 2500
+click 368 302 double
+wait 3500
+click 367 251
+wait 2500
+click 177 223
+wait 2500
+click 379 201 double
+wait 3500
+click 380 280
+wait 2500
+click 490 200
+wait 2500
+click 390 220 double
+wait 3500
+click 393 109
+wait 2500
+click 473 177
+wait 2500
+click 401 239 double
+wait 3500
+click 406 138
+wait 2500
+click 456 154
+wait 2500
+click 412 258 double
+wait 3500
+click 419 167
+wait 2500
+click 439 131
+wait 2500
+click 423 277 double
+wait 3500
+click 432 196
+wait 2500
+click 422 288
+wait 2500
+click 434 296 double
+wait 3500
+click 445 225
+wait 2500
+click 405 265
+wait 2500
+click 445 315 double
+wait 3500
+click 458 254
+wait 2500
+click 388 242
+wait 2500
+click 456 214 double
+wait 3500
+click 471 283
+wait 2500
+click 371 219
+wait 2500
+click 467 233 double
+wait 3500
+click 484 112
+wait 2500
+click 354 196
+wait 2500
+click 328 252 double
+wait 3500
+click 497 141
+wait 2500
+click 337 173
+wait 2500
+click 339 271 double
+wait 3500
+click 130 170
+wait 2500
+click 320 150
+wait 2500
+click 350 290 double
+wait 3500
+shot c_wander
+log end
+wait 15000
+expect_not CRASH
+expect_not HANG
+dump_dude
+quit

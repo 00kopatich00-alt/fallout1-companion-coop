@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "game/game.h"
+#include "game/coopnet.h"
 #include "game/gconfig.h"
 #include "game/message.h"
 #include "game/object.h"
@@ -101,6 +102,10 @@ static PerkDescription perk_data[PERK_COUNT] = {
 
 // 0x662964
 static int perk_lev[PERK_COUNT];
+
+// Coop: the perks of the character the client plays (the host's companion). Filled when
+// the client sends its character; only read on the host, where the fight is simulated.
+static int perk_coop_lev[PERK_COUNT];
 
 // perk.msg
 //
@@ -293,6 +298,41 @@ int perk_level(int perk)
     return perk >= 0 && perk < PERK_COUNT ? perk_lev[perk] : 0;
 }
 
+// The two player characters: obj_dude, and in a co-op game the companion the client plays.
+bool perk_is_player(Object* critter)
+{
+    if (critter == NULL) {
+        return false;
+    }
+    if (critter == obj_dude) {
+        return true;
+    }
+    return coopnet_get_role() != CoopRole::None && critter == coopnet_get_companion();
+}
+
+int perk_level_of(Object* critter, int perk)
+{
+    if (perk < 0 || perk >= PERK_COUNT || critter == NULL) {
+        return 0;
+    }
+    if (critter == obj_dude) {
+        return perk_lev[perk];
+    }
+    if (coopnet_get_role() != CoopRole::None && critter == coopnet_get_companion()) {
+        // On the host the companion has the perks its player sent; on the client's own
+        // machine the local table already is that player's.
+        return coopnet_get_role() == CoopRole::Host ? perk_coop_lev[perk] : perk_lev[perk];
+    }
+    return 0;
+}
+
+void perk_coop_set_companion(const int* levels, int count)
+{
+    for (int perk = 0; perk < PERK_COUNT; perk++) {
+        perk_coop_lev[perk] = levels != NULL && perk < count ? levels[perk] : 0;
+    }
+}
+
 // 0x486868
 char* perk_name(int perk)
 {
@@ -401,6 +441,34 @@ int perk_adjust_skill(int skill)
     }
 
     return modifier;
+}
+
+} // namespace fallout
+
+namespace fallout {
+
+// Perks that act for the whole party (dialogue, travel, how people react): the better of both players.
+int perk_level_any(int perk)
+{
+    int level = perk_level(perk);
+    if (perk >= 0 && perk < PERK_COUNT && coopnet_get_role() == CoopRole::Host && perk_coop_lev[perk] > level) {
+        level = perk_coop_lev[perk];
+    }
+    return level;
+}
+
+} // namespace fallout
+
+namespace fallout {
+
+int perk_add_forced(int perk)
+{
+    if (perk < 0 || perk >= PERK_COUNT || perk_lev[perk] >= perk_data[perk].max_rank) {
+        return -1;
+    }
+    perk_lev[perk] += 1;
+    perk_add_effect(obj_dude, perk);
+    return 0;
 }
 
 } // namespace fallout

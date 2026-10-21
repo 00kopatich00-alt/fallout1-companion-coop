@@ -1,0 +1,28 @@
+# CLIENT: load a save of its own, join the host, walk, leave.
+log client: connect test
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+shot c01_load_dialog
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+shot c02_in_game
+coop_join 127.0.0.1
+wait_for 120000 client: HELLO_ACK received
+wait_for 60000 client: map
+wait 8000
+shot c03_joined
+click 400 280
+wait 4000
+shot c04_walked
+click 260 240
+wait 4000
+shot c05_walked_back
+expect_not CRASH
+expect_not HANG
+expect Connected
+quit

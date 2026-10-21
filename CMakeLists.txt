@@ -63,6 +63,8 @@ target_sources(${EXECUTABLE_NAME} PUBLIC
     "src/game/config.cc"
     "src/game/config.h"
     "src/game/coopnet.cc"
+    "src/game/coop_autotest.cc"
+    "src/game/coop_autotest.h"
     "src/game/coopnet.h"
     "src/game/credits.cc"
     "src/game/credits.h"

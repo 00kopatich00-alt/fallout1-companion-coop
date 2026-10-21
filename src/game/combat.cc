@@ -1,4 +1,5 @@
 #include "game/combat.h"
+#include "game/coop_autotest.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -1811,7 +1812,7 @@ static void combat_begin_extra(Object* a1)
 
     for (index = 0; index < list_total; index++) {
         outline_type = OUTLINE_TYPE_HOSTILE;
-        if (perk_level(PERK_FRIENDLY_FOE)) {
+        if (perk_level_any(PERK_FRIENDLY_FOE)) {
             if (combat_list[index]->data.critter.combat.team == obj_dude->data.critter.combat.team) {
                 outline_type = OUTLINE_TYPE_FRIENDLY;
             }
@@ -2283,6 +2284,10 @@ static int combat_turn(Object* a1, bool a2)
             combat_free_move = 2 * perk_level(PERK_BONUS_MOVE);
             intface_update_move_points(obj_dude->data.critter.combat.ap, combat_free_move);
         } else {
+            // Coop: the client's character gets its Bonus Move free move points too.
+            if (a1 == coopnet_get_companion() && perk_is_player(a1)) {
+                combat_free_move = 2 * perk_level_of(a1, PERK_BONUS_MOVE);
+            }
             soundUpdate();
         }
 
@@ -2893,6 +2898,12 @@ static int compute_attack(Attack* attack)
 
     anim = item_w_anim(attack->attacker, attack->hitMode);
     to_hit = determine_to_hit(attack->attacker, attack->defender, attack->defenderHitLocation, attack->hitMode);
+    if (coopnet_get_role() == CoopRole::Host && attack->attacker == coopnet_get_companion()) {
+        debug_printf("\nCoop-hit: host rolls %d%% for the friend's character (location %d, mode %d)\n", to_hit, attack->defenderHitLocation, attack->hitMode);
+        char why[200];
+        combat_describe_to_hit(attack->attacker, attack->defender, attack->hitMode, why, sizeof(why));
+        debug_printf("Coop-hit: host parts: %s\n", why);
+    }
 
     damage_type = item_w_damage_type(attack->weapon);
     if (anim == ANIM_THROW_ANIM && (damage_type == DAMAGE_TYPE_EXPLOSION || damage_type == DAMAGE_TYPE_PLASMA || damage_type == DAMAGE_TYPE_EMP)) {
@@ -2916,7 +2927,7 @@ static int compute_attack(Attack* attack)
     }
 
     if (roll == ROLL_FAILURE) {
-        if (trait_level(TRAIT_JINXED)) {
+        if (trait_level_any(TRAIT_JINXED)) {
             if (roll_random(0, 1) == 1) {
                 roll = ROLL_CRITICAL_FAILURE;
             }
@@ -2925,12 +2936,12 @@ static int compute_attack(Attack* attack)
 
     if (weapon_subtype == ATTACK_TYPE_MELEE || weapon_subtype == ATTACK_TYPE_UNARMED) {
         if (roll == ROLL_SUCCESS) {
-            if (attack->attacker == obj_dude) {
-                if (perk_level(PERK_SLAYER)) {
+            if (perk_is_player(attack->attacker)) {
+                if (perk_level_of(attack->attacker, PERK_SLAYER)) {
                     roll = ROLL_CRITICAL_SUCCESS;
                 }
 
-                if (perk_level(PERK_SILENT_DEATH)
+                if (attack->attacker == obj_dude && perk_level(PERK_SILENT_DEATH)
                     && !is_hit_from_front(obj_dude, attack->defender)
                     && is_pc_flag(PC_FLAG_SNEAKING)
                     && obj_dude != attack->defender->data.critter.combat.whoHitMe) {
@@ -2940,12 +2951,12 @@ static int compute_attack(Attack* attack)
         }
     }
     if (roll == ROLL_SUCCESS) {
-        if ((weapon_subtype == ATTACK_TYPE_MELEE || weapon_subtype == ATTACK_TYPE_UNARMED) && attack->attacker == obj_dude) {
-            if (perk_level(PERK_SLAYER)) {
+        if ((weapon_subtype == ATTACK_TYPE_MELEE || weapon_subtype == ATTACK_TYPE_UNARMED) && perk_is_player(attack->attacker)) {
+            if (perk_level_of(attack->attacker, PERK_SLAYER)) {
                 roll = ROLL_CRITICAL_SUCCESS;
             }
 
-            if (perk_level(PERK_SILENT_DEATH)
+            if (attack->attacker == obj_dude && perk_level(PERK_SILENT_DEATH)
                 && !is_hit_from_front(obj_dude, attack->defender)
                 && is_pc_flag(PC_FLAG_SNEAKING)
                 && obj_dude != attack->defender->data.critter.combat.whoHitMe) {
@@ -2957,9 +2968,9 @@ static int compute_attack(Attack* attack)
     if (weapon_subtype == ATTACK_TYPE_RANGED) {
         attack->ammoQuantity = roundsSpent;
 
-        if (roll == ROLL_SUCCESS && attack->attacker == obj_dude) {
-            if (perk_level(PERK_SNIPER) != 0) {
-                if (roll_random(1, 10) <= stat_level(obj_dude, STAT_LUCK)) {
+        if (roll == ROLL_SUCCESS && perk_is_player(attack->attacker)) {
+            if (perk_level_of(attack->attacker, PERK_SNIPER) != 0) {
+                if (roll_random(1, 10) <= stat_level(attack->attacker, STAT_LUCK)) {
                     roll = ROLL_CRITICAL_SUCCESS;
                 }
             }
@@ -3313,6 +3324,15 @@ int determine_to_hit_no_range(Object* a1, Object* a2, int hitLocation, int hitMo
     return determine_to_hit_func(a1, a2, hitLocation, hitMode, 0);
 }
 
+// Coop diagnostics: the pieces a hit chance is made of, to compare the two machines.
+void combat_describe_to_hit(Object* attacker, Object* defender, int hitMode, char* buffer, size_t size)
+{
+    Object* weapon = item_hit_with(attacker, hitMode);
+    snprintf(buffer, size, "weapon pid %d, weapon skill %d, perception %d, strength %d, target AC %d, distance %d",
+        weapon != NULL ? weapon->pid : -1, weapon != NULL ? item_w_skill_level(attacker, hitMode) : skill_level(attacker, SKILL_UNARMED),
+        stat_level(attacker, STAT_PERCEPTION), stat_level(attacker, STAT_STRENGTH), stat_level(defender, STAT_ARMOR_CLASS), obj_dist(attacker, defender));
+}
+
 // 0x421E3C
 static int determine_to_hit_func(Object* attacker, Object* defender, int hitLocation, int hitMode, int check_range)
 {
@@ -3351,8 +3371,8 @@ static int determine_to_hit_func(Object* attacker, Object* defender, int hitLoca
                     range = -2 * perception;
                 }
 
-                if (attacker == obj_dude) {
-                    range -= 2 * perk_level(PERK_SHARPSHOOTER);
+                if (perk_is_player(attacker)) {
+                    range -= 2 * perk_level_of(attacker, PERK_SHARPSHOOTER);
                 }
 
                 if (range >= 0 && (attacker->data.critter.combat.results & DAM_BLIND) != 0) {
@@ -3368,8 +3388,8 @@ static int determine_to_hit_func(Object* attacker, Object* defender, int hitLoca
             accuracy -= 10 * modifier;
         }
 
-        if (attacker == obj_dude) {
-            if (trait_level(TRAIT_ONE_HANDER)) {
+        if (perk_is_player(attacker)) {
+            if (trait_level_of(attacker, TRAIT_ONE_HANDER)) {
                 if (item_w_is_2handed(weapon)) {
                     accuracy -= 40;
                 } else {
@@ -3492,8 +3512,8 @@ static void compute_damage(Attack* attack, int rounds, int damage_multiplier)
 
         damage_resistance = stat_level(critter, STAT_DAMAGE_RESISTANCE + damage_type);
 
-        if (attack->attacker == obj_dude) {
-            if (trait_level(TRAIT_FINESSE)) {
+        if (perk_is_player(attack->attacker)) {
+            if (trait_level_of(attack->attacker, TRAIT_FINESSE)) {
                 damage_resistance += 30;
             }
         }
@@ -3502,8 +3522,11 @@ static void compute_damage(Attack* attack, int rounds, int damage_multiplier)
         damage_resistance = 0;
     }
 
-    if (attack->attacker == obj_dude && item_w_subtype(attack->weapon, attack->hitMode) == ATTACK_TYPE_RANGED) {
-        bonus_ranged_damage = 2 * perk_level(PERK_BONUS_RANGED_DAMAGE);
+    if (perk_is_player(attack->attacker) && item_w_subtype(attack->weapon, attack->hitMode) == ATTACK_TYPE_RANGED) {
+        bonus_ranged_damage = 2 * perk_level_of(attack->attacker, PERK_BONUS_RANGED_DAMAGE);
+        if (attack->attacker != obj_dude) {
+            debug_printf("\nCoop-perk: the friend's character shoots with Bonus Ranged Damage +%d\n", bonus_ranged_damage);
+        }
     } else {
         bonus_ranged_damage = 0;
     }
@@ -4343,6 +4366,12 @@ static int called_shot_chance(Object* target, int hitLocation, int hitMode)
 
 static int get_called_shot_location(Object* critter, int* hit_location, int hit_mode)
 {
+    // Coop autotest: a scripted aimed shot names its body part instead of opening the window.
+    if (autotest_called_shot() >= 0) {
+        *hit_location = autotest_called_shot();
+        return 0;
+    }
+
     call_target = critter;
 
     int calledShotWindowX = (screenGetWidth() - CALLED_SHOT_WINDOW_WIDTH) / 2;
@@ -4770,7 +4799,7 @@ void combat_outline_on()
         for (index = 0; index < critters_length; index++) {
             if ((critters[index] != obj_dude || !excludeHostDude) && critters[index] != coopCompanion && (critters[index]->data.critter.combat.results & DAM_DEAD) == 0) {
                 outline_type = OUTLINE_TYPE_HOSTILE;
-                if (perk_level(PERK_FRIENDLY_FOE)) {
+                if (perk_level_any(PERK_FRIENDLY_FOE)) {
                     if (critters[index]->data.critter.combat.team == obj_dude->data.critter.combat.team) {
                         outline_type = OUTLINE_TYPE_FRIENDLY;
                     }

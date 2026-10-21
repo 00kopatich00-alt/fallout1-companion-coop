@@ -18,9 +18,24 @@
 
 namespace fallout {
 
+// Coop: the last "stage" the game announced (connecting, loading the host's map...).
+// Printed by the crash and hang reports so they say what the game was doing.
+static char g_stage[200] = "(none yet)";
+
+// Keeps the previous launch's log as <name>.prev: a player who crashes and starts the
+// game again used to overwrite the very file that explained the crash.
+void log_keep_previous(const char* path, const char* previousPath)
+{
+    remove(previousPath);
+    rename(path, previousPath);
+}
+
 void startup_log(const char* format, ...)
 {
     static bool first = true;
+    if (first) {
+        log_keep_previous("startup.log", "startup.prev.log");
+    }
     FILE* file = fopen("startup.log", first ? "wt" : "at");
     first = false;
     if (file == NULL) {
@@ -39,6 +54,15 @@ void startup_log(const char* format, ...)
     va_end(args);
     fputc('\n', file);
     fclose(file);
+}
+
+void crash_handler_set_stage(const char* format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    vsnprintf(g_stage, sizeof(g_stage), format, args);
+    va_end(args);
+    startup_log("stage: %s", g_stage);
 }
 
 // A failure the player must be told about. Used where the game used to just quit.
@@ -100,6 +124,7 @@ static LONG WINAPI crash_handler_unhandled_exception_filter(EXCEPTION_POINTERS* 
     if (log != NULL) {
         fprintf(log, "\nCRASH: unhandled exception code=0x%08lX at address=%p (module=%s+0x%llX) -- minidump written to %s\n",
             code, addr, moduleName, offset, dumpPath);
+        fprintf(log, "  last stage: %s\n", g_stage);
 
         if (exceptionPointers != NULL && exceptionPointers->ExceptionRecord != NULL
             && exceptionPointers->ExceptionRecord->NumberParameters >= 2) {
@@ -196,7 +221,7 @@ static void crash_handler_report_hang()
 
     FILE* log = fopen("coopnet_debug.log", "a");
     if (log != NULL) {
-        fprintf(log, "\nHANG: the game window has stopped responding. Main thread stack (module+offset):\n");
+        fprintf(log, "\nHANG: the game window has stopped responding (last stage: %s). Main thread stack (module+offset):\n", g_stage);
     }
 
     if (SuspendThread(thread) != (DWORD)-1) {
@@ -263,12 +288,36 @@ static void crash_handler_report_hang()
     CloseHandle(thread);
 }
 
+// Coop: the game polls its input constantly (process_bk); when that stops for a long time the main
+// thread is stuck somewhere -- also with a hidden window (scripted tests), where the window-based
+// check below cannot see it.
+static volatile DWORD g_lastHeartbeat = 0;
+
+void crash_handler_heartbeat()
+{
+    g_lastHeartbeat = GetTickCount();
+}
+
 static DWORD WINAPI crash_handler_watchdog(LPVOID)
 {
     int hungChecks = 0;
     bool reported = false;
+    bool heartbeatReported = false;
     for (;;) {
         Sleep(2000);
+
+        DWORD last = g_lastHeartbeat;
+        if (last != 0) {
+            if (GetTickCount() - last > 20000) {
+                if (!heartbeatReported) {
+                    heartbeatReported = true;
+                    reported = true;
+                    crash_handler_report_hang();
+                }
+            } else {
+                heartbeatReported = false;
+            }
+        }
 
         HWND window = NULL;
         EnumWindows(crash_handler_find_window, reinterpret_cast<LPARAM>(&window));
@@ -285,7 +334,9 @@ static DWORD WINAPI crash_handler_watchdog(LPVOID)
             }
         } else {
             hungChecks = 0;
-            reported = false;
+            if (!heartbeatReported) {
+                reported = false;
+            }
         }
     }
     return 0;
@@ -370,6 +421,21 @@ void crash_handler_install()
 void startup_log(const char* format, ...)
 {
     (void)format;
+}
+
+void crash_handler_set_stage(const char* format, ...)
+{
+    (void)format;
+}
+
+void crash_handler_heartbeat()
+{
+}
+
+void log_keep_previous(const char* path, const char* previousPath)
+{
+    (void)path;
+    (void)previousPath;
 }
 
 void startup_fail(const char* reason)

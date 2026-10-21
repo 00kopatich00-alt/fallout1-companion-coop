@@ -247,10 +247,15 @@ int stat_get_base(Object* critter, int stat)
 // 0x49C5E0
 int stat_get_base_direct(Object* critter, int stat)
 {
-    Proto* proto;
+    Proto* proto = NULL;
 
     if (stat >= 0 && stat < SAVEABLE_STAT_COUNT) {
-        proto_ptr(critter->pid, &proto);
+        // Coop: a map script's critter_damage() can pick up something that is not a real
+        // critter with a proto (a client-side placeholder) -- that crashed the client on
+        // MOUNTN1.MAP. No proto: no base stat.
+        if (critter == NULL || proto_ptr(critter->pid, &proto) == -1 || proto == NULL) {
+            return 0;
+        }
         return proto->critter.data.baseStats[stat];
     } else {
         switch (stat) {

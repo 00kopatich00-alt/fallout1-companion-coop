@@ -1367,7 +1367,7 @@ int combatai_switch_team(Object* critter, int team)
         obj_remove_outline(critter, NULL);
 
         outline_type = OUTLINE_TYPE_HOSTILE;
-        if (perk_level(PERK_FRIENDLY_FOE)) {
+        if (perk_level_any(PERK_FRIENDLY_FOE)) {
             if (critter->data.critter.combat.team == obj_dude->data.critter.combat.team) {
                 outline_type = OUTLINE_TYPE_FRIENDLY;
             }

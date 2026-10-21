@@ -8,6 +8,7 @@
 #include <thread>
 #include <vector>
 
+#include "game/coop_autotest.h"
 #include "game/coopnet.h"
 #include "plib/gnw/gnw.h"
 #include "plib/gnw/gpu_fx.h"
@@ -245,13 +246,21 @@ bool svga_init(VideoOptions* video_options)
 
     Uint32 windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI;
 
+    // Coop: a scripted self-test can run without any window showing, so the computer stays usable.
+    if (autotest_hidden()) {
+        windowFlags |= SDL_WINDOW_HIDDEN;
+    }
+
     if (video_options->fullscreen) {
         // Fullscreen at the desktop's own resolution (the picture is scaled up to
         // it) instead of switching the monitor to the game's tiny video mode.
         windowFlags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
     }
 
-    gSdlWindow = SDL_CreateWindow(GNW95_title, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+    int windowX = SDL_WINDOWPOS_UNDEFINED;
+    int windowY = SDL_WINDOWPOS_UNDEFINED;
+    autotest_window_position(&windowX, &windowY);
+    gSdlWindow = SDL_CreateWindow(GNW95_title, windowX, windowY,
         video_options->width * video_options->scale,
         video_options->height * video_options->scale,
         windowFlags);

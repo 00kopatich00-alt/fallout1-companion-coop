@@ -1,0 +1,37 @@
+# HOST: poison, radiation and items on both characters, then lethal radiation
+log host: rads and poison
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_host
+wait_for 120000 host: friend connected
+wait 8000
+give companion 40 3
+give dude 40 3
+poison companion 30
+poison dude 30
+rads companion 300
+time 1
+dump_companion
+dump_dude
+wait 4000
+shot h_poisoned
+rads dude 300
+dump_dude
+wait 4000
+log lethal radiation on the host's character: both games should end
+rads dude 1500
+time 30
+wait_for 40000 notified peer game over
+shot h_after_lethal_rads
+keys space 6
+wait 8000
+expect_not CRASH
+expect_not HANG
+quit

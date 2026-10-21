@@ -36,6 +36,8 @@
 #include "game/scripts.h"
 #include "game/select.h"
 #include "game/selfrun.h"
+#include "game/skill.h"
+#include "game/stat.h"
 #include "game/wordwrap.h"
 #include "game/worldmap.h"
 #include "plib/color/color.h"
@@ -113,6 +115,38 @@ int gnw_main(int argc, char** argv)
     gmovie_play(MOVIE_IPLOGO, GAME_MOVIE_FADE_IN);
     gmovie_play(MOVIE_INTRO, 0);
     startup_log("stage: reached the main menu");
+    debug_printf("\nCoop-stage: main menu reached\n");
+
+    // Developer check (only when a file named wrap_test.txt sits next to the exe): wraps every
+    // skill and stat description the way the character screen does and logs failures.
+    {
+        FILE* probe = fopen("wrap_test.txt", "rb");
+        if (probe != NULL) {
+            fclose(probe);
+            text_font(101);
+            for (int round = 0; round < 2; round++) {
+                for (int i = 0; i < 40; i++) {
+                    const char* source = round == 0 ? skill_description(i) : stat_description(i);
+                    if (source == NULL || i >= (round == 0 ? SKILL_COUNT : 7)) {
+                        continue;
+                    }
+                    char copy[512];
+                    snprintf(copy, sizeof(copy), "%s", source);
+                    short breaks[64];
+                    short count = 0;
+                    int rc = word_wrap(copy, 150, breaks, &count);
+                    debug_printf("\nCoop-text: %s %d: %d chars, word_wrap=%d, lines=%d\n", round == 0 ? "skill" : "stat", i, static_cast<int>(strlen(copy)), rc, static_cast<int>(count));
+                    if (rc != 0) {
+                        debug_printf("  glyph widths (text_char_width):");
+                        for (int k = 0; copy[k] != '\0' && k < 160; k++) {
+                            debug_printf(" %d:%d", copy[k] & 0xFF, text_char_width(copy[k] & 0xFF));
+                        }
+                        debug_printf("\n");
+                    }
+                }
+            }
+        }
+    }
 
     if (main_menu_create() == 0) {
         int language_filter = 1;

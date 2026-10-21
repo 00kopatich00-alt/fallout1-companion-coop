@@ -4310,7 +4310,7 @@ static int barter_compute_value(Object* buyer, Object* seller)
     int mod = 100;
 
     if (buyer == obj_dude) {
-        if (perk_level(PERK_MASTER_TRADER)) {
+        if (perk_level_any(PERK_MASTER_TRADER)) {
             mod += 25;
         }
     }

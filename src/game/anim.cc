@@ -523,7 +523,23 @@ static int anim_preload(Object* object, int fid, CacheEntry** cacheEntryPtr)
         return 0;
     }
 
-    debug_printf("\nCoop-debug: anim_preload failed: fid=0x%x owner pid=%d\n", fid, object != NULL ? object->pid : -1);
+    // Report each missing picture once: a character whose art is not in the game files (the censored
+    // digital versions leave out the children) used to fill the log with the same line.
+    static int reported[32];
+    static int reportedCount = 0;
+    bool known = false;
+    for (int i = 0; i < reportedCount; i++) {
+        if (reported[i] == fid) {
+            known = true;
+            break;
+        }
+    }
+    if (!known) {
+        if (reportedCount < 32) {
+            reported[reportedCount++] = fid;
+        }
+        debug_printf("\nCoop-debug: anim_preload failed: fid=0x%x owner pid=%d (reported once; the picture is missing from the game files)\n", fid, object != NULL ? object->pid : -1);
+    }
     return -1;
 }
 

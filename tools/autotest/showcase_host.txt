@@ -1,0 +1,105 @@
+# SHOWCASE (host, left window): a slow, visible tour of what co-op v0.6 can do, with captions in the title bar and the message pane.
+on_fail continue
+caption Fallout 1 co-op v0.6 - HOST (left window)
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 5000
+caption NEW: co-op menu on F9, join from the main menu, rejoin after loading a save
+key l
+wait 3500
+caption The host loads a normal single-player save
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 6000
+coop_host
+caption HOST: hosting - the friend joins from his own PC (here: the right window)
+wait_for 120000 host: friend connected
+wait 7000
+caption The friend has his OWN character, stats and level - and the same world
+wait 8000
+caption F9 opens the co-op screen: who is connected and a live connection log
+key f9
+wait 8000
+key esc
+wait 3000
+caption F11 shows FPS, memory and the connection quality (GOOD / POOR / LOST)
+key f11
+wait 8000
+key f11
+wait 2000
+caption Both players walk around freely
+click 420 300
+wait 5000
+click 250 250
+wait 6000
+caption NEW: the friend's perks and traits travel with his character
+wait 12000
+caption NEW: combat with real animations - the friend's perks count (Bonus Ranged Damage)
+wield companion 8 29
+give companion 40 3
+wield dude 8 29
+spawn 16777264 4 3
+wait 4000
+start_fight
+wait 9000
+attack_enemy
+wait 7000
+attack_enemy
+wait 7000
+key space
+wait 15000
+attack_enemy
+wait 7000
+key space
+wait 12000
+attack_enemy
+wait 7000
+key space
+wait 10000
+caption NEW: cutscenes play on both screens
+movie 0
+wait 6000
+caption NEW: doors and pickups show the reach animation, even with a weapon in hand
+drop_item 40
+wait 3000
+pickup_item
+wait 8000
+use_door
+wait 8000
+use_door
+wait 8000
+caption Conversations are shared: the friend sees and hears them too
+talk
+wait 12000
+key esc
+wait 6000
+caption FIXED: Russian text on the character screen (descriptions were missing)
+key c
+wait 5000
+click 400 188
+wait 6000
+click 400 205
+wait 6000
+key esc
+wait 4000
+caption SHARED DEATH: if one character dies, both games end
+damage companion 999
+wait_for 30000 companion died, ending shared game
+wait 9000
+keys space 8
+wait 12000
+caption FIXED: the friend's old body no longer stays in the world after a reload
+key l
+wait 3500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 5000
+coop_host
+wait_for 120000 host: friend connected
+wait 10000
+caption NEW: the friend came back by himself after loading a save (no F9 needed)
+list_dead
+wait 9000
+caption Thanks for watching! v0.6 - download link in the description
+wait 8000
+quit

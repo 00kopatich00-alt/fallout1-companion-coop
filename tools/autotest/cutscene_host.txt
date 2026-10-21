@@ -1,0 +1,24 @@
+# HOST: cutscenes. The client must play each one too and come back to the map.
+log host: cutscenes
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_host
+wait_for 120000 host: friend connected
+wait 8000
+movie 0
+wait 3000
+shot h_after_movie1
+movie 2
+wait 4000
+shot h_after_movie2
+wait 5000
+expect_not CRASH
+expect_not HANG
+quit

@@ -101,9 +101,9 @@ int reaction_get(Object* critter)
         return -1;
     }
 
-    compat_scr_set_local_var(sid, 0, v2 + 10 * perk_level(PERK_PRESENCE));
+    compat_scr_set_local_var(sid, 0, v2 + 10 * perk_level_any(PERK_PRESENCE));
 
-    if (perk_level(PERK_CULT_OF_PERSONALITY) > 0) {
+    if (perk_level_any(PERK_CULT_OF_PERSONALITY) > 0) {
         if (compat_scr_get_local_var(sid, 0, &v2) == -1) {
             return -1;
         }

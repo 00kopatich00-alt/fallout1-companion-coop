@@ -7,6 +7,7 @@
 
 #include <SDL.h>
 
+#include "game/coop_autotest.h"
 #include "platform_compat.h"
 #include "plib/gnw/intrface.h"
 #include "plib/gnw/memory.h"
@@ -138,8 +139,10 @@ int debug_printf(const char* format, ...)
     int rc;
 
     if (debug_func != NULL) {
-        char string[260];
+        // Coop: was 260, which cut the long network-statistics lines in the log short.
+        char string[1024];
         vsnprintf(string, sizeof(string), format, args);
+        autotest_note_debug(string);
 
         rc = debug_func(string);
     } else {

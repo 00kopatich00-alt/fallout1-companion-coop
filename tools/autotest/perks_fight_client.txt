@@ -1,0 +1,57 @@
+# CLIENT: give itself perks and traits, join the host, fight until the host is finished.
+log client: perks + fight test
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_join 127.0.0.1
+wait_for 120000 client: HELLO_ACK received
+wait_for 60000 client: map
+wait 3000
+dump_dude
+perk bonus_ranged_damage 2
+perk sniper 1
+perk more_criticals 1
+perk action_boy 2
+perk toughness 1
+trait fast_shot finesse
+char_changed
+wait 4000
+dump_dude
+shot c01_perks_given
+wait_for 120000 Coop: received COMBAT_BEGIN
+log fight
+# our own turn: attack cursor, shoot the nearest enemy; the host ends fights quickly, so repeat a few rounds
+wait_for 120000 myTurnActive=1
+wait 2500
+cursor attack
+hover_enemy
+shot c02_hover_enemy
+click_here
+wait 5000
+shot c03_shot
+cursor attack
+hover_enemy
+click_here
+wait 5000
+key space
+wait 15000
+shot c04_after_end_turn
+wait_for 60000 myTurnActive=1
+wait 2000
+cursor attack
+hover_enemy
+click_here
+wait 6000
+shot c05_second_turn
+# stay connected until the host has checked the friend's shots
+wait 60000
+expect_not CRASH
+expect_not HANG
+dump_dude
+quit

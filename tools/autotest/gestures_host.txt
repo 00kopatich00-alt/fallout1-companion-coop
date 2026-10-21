@@ -1,0 +1,39 @@
+# HOST: reach gestures with a weapon in hand (pick up an item, open a door); the client must show them.
+log host: armed gestures
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_host
+wait_for 120000 host: friend connected
+wait 8000
+wield dude 8 29
+drop_item 40
+wait 1500
+pickup_item
+wait 6000
+shot h_pickup_armed
+use_door
+wait 7000
+shot h_door_armed
+use_door
+wait 7000
+shot h_door_armed_again
+log unarmed: the same again
+wield dude 4
+drop_item 40
+wait 1500
+pickup_item
+wait 6000
+use_door
+wait 7000
+shot h_end
+expect_not CRASH
+expect_not HANG
+expect_not anim_preload failed
+quit

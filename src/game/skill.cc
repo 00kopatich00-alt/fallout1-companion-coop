@@ -282,8 +282,12 @@ int skill_points(Object* obj, int skill)
         return 0;
     }
 
-    Proto* proto;
-    proto_ptr(obj->pid, &proto);
+    Proto* proto = NULL;
+    // Coop: a character without a proto (the friend's character before its numbers arrived) must not
+    // crash the game -- reading the world map as host crashed here.
+    if (obj == NULL || proto_ptr(obj->pid, &proto) == -1 || proto == NULL) {
+        return 0;
+    }
 
     return proto->critter.data.skills[skill];
 }
@@ -471,9 +475,9 @@ int skill_use(Object* obj, Object* a2, int skill, int criticalChanceModifier)
     int maximumHpToHeal = 0;
     int minimumHpToHeal = 0;
 
-    if (obj == obj_dude) {
+    if (perk_is_player(obj)) {
         if (skill == SKILL_FIRST_AID || skill == SKILL_DOCTOR) {
-            int healerRank = perk_level(PERK_HEALER);
+            int healerRank = perk_level_of(obj, PERK_HEALER);
             minimumHpToHeal = 2 * healerRank;
             maximumHpToHeal = 5 * healerRank;
         }
@@ -808,7 +812,7 @@ int skill_check_stealing(Object* a1, Object* a2, Object* item, bool isPlanting)
 
     int stealModifier = 1 - gStealCount;
 
-    if (a1 != obj_dude || !perk_level(PERK_PICKPOCKET)) {
+    if (!perk_is_player(a1) || !perk_level_of(a1, PERK_PICKPOCKET)) {
         // -4% per item size
         stealModifier -= 4 * item_size(item);
 
