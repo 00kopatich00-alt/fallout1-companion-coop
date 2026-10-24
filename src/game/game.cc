@@ -585,6 +585,10 @@ int game_handle_input(int eventCode, bool isInCombatMode)
         debug_printf("\nCoop: F9 pressed (label=\"%s\")\n", coopnet_get_instance_label());
         coopnet_open_menu();
         break;
+    case KEY_SPACE:
+        // Space is the normal game's "end turn" key (combat_input()): without it here a client
+        // pressing Space did nothing, and a character left with too few action points to shoot
+        // held the whole fight up (found by the explore autotest).
     case KEY_RETURN:
         // Coop client's combat "end turn" -- mirrors obj_dude's own
         // KEY_RETURN -> combat_end() handling inside combat_input(), which

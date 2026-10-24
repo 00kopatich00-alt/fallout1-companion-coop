@@ -170,6 +170,7 @@ enum CoopMsgType : uint8_t {
     COOP_MSG_XP = 64, // host -> client, experience the party just earned -- see CoopXp
     COOP_MSG_HEAD_FRAME = 65, // host -> client, the talking-head frame the host just drew -- see CoopHeadFrame
     COOP_MSG_SCENERY_DELTA = 77, // host -> client, scenery that appeared or vanished since the list (the police box...)
+    COOP_MSG_STATE_CHECK = 78, // host -> client, where every nearby character stands right now, so the client can find (and repair) drift -- see CoopStateCheck
     COOP_MSG_PING = 75, // either direction, a timestamp the peer must echo back at once
     COOP_MSG_PONG = 76, // either direction, the echo: the round trip time is read from it
     COOP_MSG_REMOTE_CURSOR = 74, // host -> client, the picture of the host's mouse pointer (an arrow, or the item being dragged) when it changes
@@ -262,7 +263,7 @@ struct CoopSettings {
 // Bumped whenever behavior changes in a way an older exe on the other side
 // would misread -- a mismatch is now refused with a clear message (see the
 // HELLO handling) instead of producing confusing half-working sessions.
-const uint32_t kCoopProtocolVersion = 14;
+const uint32_t kCoopProtocolVersion = 15;
 
 // The first two fields are the original HELLO and stay in front, so even an older client's
 // shorter HELLO can still be read far enough to refuse it with a clear message.
@@ -336,6 +337,25 @@ struct CoopAttackSfx {
 struct CoopWorldRemove {
     int32_t id;
     int32_t pid;
+};
+
+// Host -> client: a check of the two worlds. Every few seconds the host lists where each
+// character near the players stands (only ones standing still); the client compares with its
+// own copy, logs "Coop-desync:" lines and puts back anything still wrong on the next check.
+// Ids are the same ones the world stream uses (-1 = the host's character, -2 = the companion).
+const int kCoopStateCheckMax = 64;
+struct CoopStateCheckEntry {
+    int32_t id;
+    int32_t pid;
+    int32_t tile;
+    uint8_t elevation;
+    uint8_t dead;
+    uint8_t pad[2];
+};
+struct CoopStateCheck {
+    uint32_t serial;
+    int32_t count;
+    CoopStateCheckEntry entries[kCoopStateCheckMax];
 };
 
 // Host -> client world sync: a loose ground item exists (present=1) or is gone
@@ -4288,6 +4308,53 @@ static bool coopnet_host_critter_exists(int32_t id, int32_t pid)
     return false;
 }
 
+// Host-side only: sends a CoopStateCheck every few seconds (see its comment).
+static void coopnet_host_send_state_check()
+{
+    static uint32_t lastMs = 0;
+    static uint32_t serial = 0;
+    uint32_t now = coopnet_now_ms();
+    if (now - lastMs < 3000 || obj_dude == NULL || g_coopCompanion == NULL || g_coopRemoteHostActive
+        || !coopnet_host_companion_is_current()) {
+        return;
+    }
+    lastMs = now;
+
+    CoopStateCheck check;
+    memset(&check, 0, sizeof(check));
+    check.serial = ++serial;
+
+    Object* players[2] = { obj_dude, g_coopCompanion };
+    for (int p = 0; p < 2; p++) {
+        if (!anim_busy(players[p])) {
+            CoopStateCheckEntry& e = check.entries[check.count++];
+            e.id = p == 0 ? -1 : -2;
+            e.pid = players[p]->pid;
+            e.tile = players[p]->tile;
+            e.elevation = static_cast<uint8_t>(players[p]->elevation);
+            e.dead = critter_is_dead(players[p]) ? 1 : 0;
+        }
+    }
+
+    for (Object* o = obj_find_first_at(obj_dude->elevation); o != NULL && check.count < kCoopStateCheckMax; o = obj_find_next_at()) {
+        if (FID_TYPE(o->fid) != OBJ_TYPE_CRITTER || o == obj_dude || o == g_coopCompanion || o->pid == 0x1000000 || o->pid == kCoopCompanionPid
+            || (o->flags & OBJECT_HIDDEN) != 0 || o->tile == -1 || anim_busy(o)) {
+            continue;
+        }
+        if (tile_dist(o->tile, obj_dude->tile) > kCoopWorldRadius && tile_dist(o->tile, g_coopCompanion->tile) > kCoopWorldRadius) {
+            continue;
+        }
+        CoopStateCheckEntry& e = check.entries[check.count++];
+        e.id = o->id;
+        e.pid = o->pid;
+        e.tile = o->tile;
+        e.elevation = static_cast<uint8_t>(o->elevation);
+        e.dead = critter_is_dead(o) ? 1 : 0;
+    }
+
+    coopnet_send_message(g_coopPeerSocket, COOP_MSG_STATE_CHECK, &check, sizeof(check));
+}
+
 static void coopnet_host_broadcast_world()
 {
     if (obj_dude == NULL) {
@@ -6302,6 +6369,7 @@ static void coopnet_poll_host()
             coopnet_host_broadcast_game_time();
             coopnet_host_broadcast_combat_participants();
             coopnet_host_broadcast_world();
+            coopnet_host_send_state_check();
             coopnet_host_broadcast_settings();
             g_coopSendDroppable = wasDroppable;
             // Changes are only sent once, so these may wait for the peer.
@@ -6347,7 +6415,9 @@ static void coopnet_client_fix_idle_visual(Object* obj)
     }
     int animType = FID_ANIM_TYPE(obj->fid);
     bool movingPose = animType == ANIM_WALK || animType == ANIM_RUNNING;
-    if (obj->x == 0 && obj->y == 0 && !movingPose) {
+    // Small offsets on a standing character come from its own art (idle frames have hot-spot
+    // shifts of a few pixels) and are drawn the same way in the normal game: leave them alone.
+    if (!movingPose && abs(obj->x) <= 8 && abs(obj->y) <= 8) {
         return;
     }
     debug_printf("\nCoop-visual: idle pid=%d on tile %d has offset (%d,%d) anim=%d -- resetting\n", obj->pid, obj->tile, obj->x, obj->y, animType);
@@ -6384,13 +6454,20 @@ static void coopnet_client_idle_visual_sweep()
     {
         std::vector<Object*> runaway;
         for (Object* o = obj_find_first_at(map_elevation); o != NULL; o = obj_find_next_at()) {
-            if (FID_TYPE(o->fid) == OBJ_TYPE_CRITTER && o->tile != -1 && (abs(o->x) > 48 || abs(o->y) > 36)) {
+            int oAnim = FID_ANIM_TYPE(o->fid);
+            bool walking = oAnim == ANIM_WALK || oAnim == ANIM_RUNNING;
+            // Knock-backs and other one-off animations move the picture on purpose; only a walk/run, or a
+            // character standing still, can be a runaway.
+            if (FID_TYPE(o->fid) == OBJ_TYPE_CRITTER && o->tile != -1 && (walking || !anim_busy(o)) && (abs(o->x) > 48 || abs(o->y) > 36)) {
                 runaway.push_back(o);
             }
         }
         for (size_t i = 0; i < runaway.size(); i++) {
             Object* o = runaway[i];
-            debug_printf("\nCoop-visual: runaway sprite pid=%d tile=%d offset (%d,%d) -- stopped and put back\n", o->pid, o->tile, o->x, o->y);
+            int which = o == g_coopCompanion ? 0 : (o == obj_dude ? 1 : -1);
+            debug_printf("\nCoop-visual: runaway sprite pid=%d tile=%d offset (%d,%d) anim=%d busy=%d moveDest=%d commanded=%d rotation=%d -- stopped and put back\n",
+                o->pid, o->tile, o->x, o->y, FID_ANIM_TYPE(o->fid), anim_busy(o) ? 1 : 0, which >= 0 ? g_coopMoveDest[which] : -2,
+                which >= 0 ? g_coopLastCommandedTile[which] : -2, o->rotation);
             register_clear_forced(o);
             Rect rect;
             obj_move_to_tile(o, o->tile, o->elevation, &rect);
@@ -6481,7 +6558,11 @@ static void coopnet_client_apply_position(const CoopPosition& pos)
         // produced a visible stutter/glitch on the client (constant
         // redraw fighting the object's own idle animation). Only touch it
         // when the rotation actually changed (e.g. turned in place).
-        if (target->rotation != pos.rotation) {
+        // Not while it is still running through this tile, though: turning a running sprite
+        // makes its art move one way while the step logic waits for it to cross into another
+        // tile, and the picture slides off its tile ("runaway sprite", every one of them was a
+        // run started here -- found by the drift test).
+        if (target->rotation != pos.rotation && !anim_busy(target)) {
             Rect rect;
             obj_set_rotation(target, pos.rotation, &rect);
             tile_refresh_rect(&rect, pos.elevation);
@@ -6580,6 +6661,7 @@ static void coopnet_client_apply_position(const CoopPosition& pos)
         // show empty ground far from its character -- confirmed via testing
         // ("spawns in a random place" after encounters / entering the Hub).
         bool bigJump = pos.which == 0 && (target->elevation != pos.elevation || tile_dist(target->tile, pos.tile) > 20);
+        register_clear_forced(target); // a run still going would carry on from the new tile in the old direction
         Rect rect;
         obj_move_to_tile(target, pos.tile, pos.elevation, &rect);
         obj_set_rotation(target, pos.rotation, &rect);
@@ -6614,6 +6696,13 @@ static void coopnet_client_apply_position(const CoopPosition& pos)
     }
 
     register_clear_forced(target);
+    if (target->x != 0 || target->y != 0) {
+        // The previous run was stopped mid-step: start the next one from the tile itself,
+        // otherwise the leftover offset is carried into it and keeps growing.
+        Rect offsetRect;
+        obj_move_to_tile(target, target->tile, target->elevation, &offsetRect);
+        tile_refresh_rect(&offsetRect, target->elevation);
+    }
     g_coopSanctionedMoveDepth++;
     register_begin(ANIMATION_REQUEST_UNRESERVED);
     register_object_run_to_tile(target, pos.tile, pos.elevation, -1, 0);
@@ -6646,6 +6735,76 @@ static int32_t coopnet_find_participant_id(Object* localObject)
         }
     }
     return -1;
+}
+
+// Client-side only: compares a CoopStateCheck with this client's copy of the world (see its
+// comment). A difference seen on two checks in a row is not a walk still catching up: the
+// character is put on the host's tile.
+static void coopnet_client_apply_state_check(const CoopStateCheck& check)
+{
+    static std::vector<int32_t> wrongLastTime;
+    static uint32_t totalChecks = 0;
+    static uint32_t totalDiffs = 0;
+    static uint32_t totalRepairs = 0;
+    if (g_coopClientMapLoading || g_coopRemoteClientActive || check.count < 0 || check.count > kCoopStateCheckMax) {
+        return;
+    }
+    totalChecks++;
+
+    std::vector<int32_t> wrongNow;
+    int diffs = 0;
+    int missing = 0;
+    int repaired = 0;
+    for (int i = 0; i < check.count; i++) {
+        const CoopStateCheckEntry& e = check.entries[i];
+        Object* o = e.id == -1 ? obj_dude : (e.id == -2 ? g_coopCompanion : coopnet_find_participant_object(e.id));
+        if (o == NULL || o->tile == -1) {
+            missing++;
+            continue;
+        }
+        if (anim_busy(o)) {
+            continue;
+        }
+        bool deadHere = critter_is_dead(o);
+        if (o->tile == e.tile && o->elevation == e.elevation && deadHere == (e.dead != 0)) {
+            continue;
+        }
+        diffs++;
+        debug_printf("\nCoop-desync: pid=%d id=%d is on tile %d (elevation %d, dead %d) here but tile %d (elevation %d, dead %d) on the host, %d tiles off\n",
+            e.pid, e.id, o->tile, o->elevation, deadHere ? 1 : 0, e.tile, e.elevation, e.dead, o->elevation == e.elevation ? tile_dist(o->tile, e.tile) : -1);
+        bool seenBefore = false;
+        for (size_t n = 0; n < wrongLastTime.size(); n++) {
+            if (wrongLastTime[n] == e.id) {
+                seenBefore = true;
+                break;
+            }
+        }
+        if (seenBefore && deadHere == (e.dead != 0)) {
+            register_clear_forced(o);
+            Rect rect;
+            obj_move_to_tile(o, e.tile, e.elevation, &rect);
+            tile_refresh_rect(&rect, e.elevation);
+            if (o == g_coopCompanion) {
+                g_coopLastCommandedTile[0] = -1;
+                g_coopMoveDest[0] = -1;
+            } else if (o == obj_dude) {
+                g_coopLastCommandedTile[1] = -1;
+                g_coopMoveDest[1] = -1;
+            } else {
+                coopnet_client_reset_commanded_tile_for(o);
+            }
+            repaired++;
+        } else {
+            wrongNow.push_back(e.id);
+        }
+    }
+    wrongLastTime = wrongNow;
+    totalDiffs += diffs;
+    totalRepairs += repaired;
+    if (diffs > 0 || missing > 0 || totalChecks % 20 == 0) {
+        debug_printf("\nCoop-desync: check %u: %d characters, %d differ, %d missing here, %d put back (so far: %u checks, %u differences, %u put back)\n",
+            check.serial, check.count, diffs, missing, repaired, totalChecks, totalDiffs, totalRepairs);
+    }
 }
 
 // Client-side: the reverse of coopnet_resolve_anim_id() (host side) --
@@ -8163,6 +8322,10 @@ static void coopnet_poll_client()
                     pending.dueMs = coopnet_now_ms() + (sfx.delay > 0 ? static_cast<uint32_t>(sfx.delay) * 60 : 0);
                     g_coopPendingSfx.push_back(pending);
                 }
+            } else if (type == COOP_MSG_STATE_CHECK && payloadLen == sizeof(CoopStateCheck)) {
+                CoopStateCheck check;
+                memcpy(&check, payload, sizeof(check));
+                coopnet_client_apply_state_check(check);
             } else if (type == COOP_MSG_WORLD_REMOVE && payloadLen == sizeof(CoopWorldRemove)) {
                 CoopWorldRemove rem;
                 memcpy(&rem, payload, sizeof(rem));

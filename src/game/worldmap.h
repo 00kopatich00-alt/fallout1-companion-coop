@@ -157,6 +157,7 @@ int world_map(WorldMapContext ctx);
 
 // Coop autotest: true while the world map screen is on.
 bool world_map_screen_open();
+bool town_map_screen_open();
 WorldMapContext town_map(WorldMapContext ctx);
 void KillWorldWin();
 int worldmap_script_jump(int city, int a2);

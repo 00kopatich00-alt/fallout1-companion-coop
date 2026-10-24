@@ -395,7 +395,12 @@ Object* explore_nearest_exit(Object* me, bool anyOne)
             }
             continue;
         }
+        // Exits to the world map first (map 0 / -1 / -2), then everything else: the nearest exit
+        // alone kept the bot walking between two town maps forever.
         int d = tile_dist(o->tile, me->tile);
+        if (o->data.misc.map > 0) {
+            d += 1000;
+        }
         if (d < bestDistance) {
             bestDistance = d;
             best = o;
@@ -447,6 +452,13 @@ void explore_decide(uint32_t now)
     }
     g_exploreWasCombat = combat;
 
+    if (!client && town_map_screen_open()) {
+        // The town map comes before the world map when leaving a town: its world-map button goes on.
+        explore_inject("click 527 446");
+        explore_inject("wait 3000");
+        return;
+    }
+
     if (!client && world_map_screen_open()) {
         // Travel somewhere else on the map (the party dot's own surroundings enter a local map).
         char line[48];
@@ -475,6 +487,30 @@ void explore_decide(uint32_t now)
             return;
         }
         g_exploreCombatRounds++;
+        // A fight that drags on: the host walks out of it through an exit grid (leaving mid-fight is
+        // allowed and is worth testing anyway), so one long encounter can't eat the whole run.
+        Object* fightExit = !client && g_exploreCombatRounds > 12 ? explore_nearest_exit(obj_dude, false) : NULL;
+        if (fightExit != NULL) {
+            int target = fightExit->tile;
+            int hop = obj_dude->tile;
+            for (int step = 0; step < 12 && hop != target; step++) {
+                int next = tile_num_in_direction(hop, tile_dir(hop, target), 1);
+                if (next < 0 || next >= 40000) {
+                    break;
+                }
+                hop = next;
+            }
+            if (g_exploreCombatRounds == 13) {
+                result_line("EXPLORE leaving a long fight on %s through the exit at tile %d", g_exploreLastMap, target);
+            }
+            register_begin(ANIMATION_REQUEST_RESERVED);
+            register_object_move_to_tile(obj_dude, hop, obj_dude->elevation, obj_dude->data.critter.combat.ap, 0);
+            register_end();
+            explore_inject("wait 4000");
+            explore_inject("key space");
+            explore_inject("wait 3000");
+            return;
+        }
         if (g_exploreCombatRounds % 5 != 0 && explore_find_enemy() != NULL) {
             explore_inject("cursor attack");
             explore_inject("hover_enemy");
@@ -507,9 +543,22 @@ void explore_decide(uint32_t now)
     }
     g_exploreLastTile = obj_dude->tile;
 
-    Object* exitObj = explore_nearest_exit(obj_dude, g_exploreIdleRounds >= 3);
-    if (exitObj != NULL && g_exploreIdleRounds < 8) {
-        int rc = explore_run_to(exitObj->tile);
+    Object* exitObj = explore_nearest_exit(obj_dude, false);
+    if (exitObj != NULL && g_exploreIdleRounds < 3) {
+        // The engine's path search gives up on long paths: head for a far exit in hops.
+        int target = exitObj->tile;
+        if (tile_dist(obj_dude->tile, target) > 14) {
+            int hop = obj_dude->tile;
+            for (int step = 0; step < 12; step++) {
+                int next = tile_num_in_direction(hop, tile_dir(hop, target), 1);
+                if (next < 0 || next >= 40000) {
+                    break;
+                }
+                hop = next;
+            }
+            target = hop;
+        }
+        int rc = explore_run_to(target);
         if (g_exploreDecisions % 10 == 0 || rc != 0) {
             result_line("EXPLORE run to exit tile %d, %d tiles away from tile %d: rc %d, idle rounds %d", exitObj->tile, tile_dist(exitObj->tile, obj_dude->tile), obj_dude->tile, rc, g_exploreIdleRounds);
         }
@@ -521,7 +570,7 @@ void explore_decide(uint32_t now)
         if (tile >= 0 && tile < 40000) {
             explore_run_to(tile);
         }
-        if (g_exploreIdleRounds > 10) {
+        if (g_exploreIdleRounds > 5) {
             g_exploreIdleRounds = 0;
         }
     }

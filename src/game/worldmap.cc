@@ -3129,7 +3129,7 @@ static void map_num(int value, int digits, int x, int y, int is_town_map)
 // in artificial parameter via ESI.
 //
 // 0x4AD988
-WorldMapContext town_map(WorldMapContext ctx)
+static WorldMapContext town_map_impl(WorldMapContext ctx)
 {
     const char* title;
     const char* text;
@@ -3826,6 +3826,22 @@ static void BlackOut()
     win_disable_button(WrldToggle);
 
     memset(world_buf, colorTable[0], WM_WINDOW_WIDTH * WM_WINDOW_HEIGHT);
+}
+
+static bool g_townMapScreenOpen = false;
+
+bool town_map_screen_open()
+{
+    return g_townMapScreenOpen;
+}
+
+// Thin wrapper so the autotest knows the town map screen is up (see town_map_screen_open()).
+WorldMapContext town_map(WorldMapContext ctx)
+{
+    g_townMapScreenOpen = true;
+    WorldMapContext rc = town_map_impl(ctx);
+    g_townMapScreenOpen = false;
+    return rc;
 }
 
 } // namespace fallout

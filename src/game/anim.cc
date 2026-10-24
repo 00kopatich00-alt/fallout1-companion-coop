@@ -2733,6 +2733,13 @@ static void object_move(int index)
 
         int v10 = tile_num_in_direction(object->tile, rotation, 1);
         Object* v12 = obj_blocking_at(object, v10, object->elevation);
+        // Coop: on the client every walk mirrors one the host already made on its own (authoritative)
+        // map, so a blocker here only exists in the client's copy -- a critter standing a tile off, a
+        // leftover object. Stopping for it left the sprite stuck halfway between two tiles (the
+        // "running off screen" bug). Only doors still matter: they are opened as usual.
+        if (v12 != NULL && coopnet_get_role() == CoopRole::Client && !anim_can_use_door(object, v12)) {
+            v12 = NULL;
+        }
         if (v12 != NULL) {
             if (!anim_can_use_door(object, v12)) {
                 sad_entry->field_1C = make_path(object, object->tile, sad_entry->field_24, sad_entry->rotations, 1);
@@ -2748,6 +2755,10 @@ static void object_move(int index)
 
                     sad_entry->field_20 = 0;
                 } else {
+                    // CE: the walk ends here, mid-step -- put the sprite back on its tile instead of
+                    // leaving it drawn at the pixel offset of the step it never finished.
+                    obj_move_to_tile(object, object->tile, object->elevation, &temp);
+                    rect_min_bound(&dirty, &temp, &dirty);
                     sad_entry->field_20 = -1000;
                 }
                 v10 = -1;

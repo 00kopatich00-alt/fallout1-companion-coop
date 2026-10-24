@@ -1,0 +1,5 @@
+k 60
+sxe -c "k 60;~*k 25;.logclose;q" av
+sxe -c2 "k 60;~*k 25;.logclose;q" av
+sxe -c "k 60;~*k 25;.logclose;q" c0000374
+g
