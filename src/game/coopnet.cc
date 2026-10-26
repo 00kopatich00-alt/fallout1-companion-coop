@@ -10682,6 +10682,13 @@ enum CoopMenuKey {
     COOP_MENU_KEY_TAB_GLITCHES = 4004,
 };
 
+// Shows the phone's on-screen keyboard while a co-op screen that takes typed
+// keys (H/J, the address) is open.
+struct CoopTextInputScope {
+    CoopTextInputScope() { beginTextInput(); }
+    ~CoopTextInputScope() { endTextInput(); }
+};
+
 void coopnet_open_menu()
 {
     if (g_coopMenuOpen) {
@@ -10689,6 +10696,7 @@ void coopnet_open_menu()
     }
 
     coopnet_sockets_init();
+    CoopTextInputScope textInput;
 
     const int W = 580;
     const int H = 420;
@@ -11166,6 +11174,7 @@ static void coopnet_chars_refresh(std::vector<CoopCharEntry>& out)
 bool coopnet_main_menu_join()
 {
     coopnet_chars_ensure_dir();
+    CoopTextInputScope textInput;
 
     std::vector<CoopCharEntry> chars;
     coopnet_chars_refresh(chars);

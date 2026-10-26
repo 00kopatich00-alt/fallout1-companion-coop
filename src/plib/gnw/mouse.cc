@@ -454,6 +454,9 @@ void mouse_info()
                 mouse_simulate_input(0, 0, MOUSE_STATE_LEFT_BUTTON_DOWN);
             } else if (gesture.numberOfTouches == 2) {
                 mouse_simulate_input(0, 0, MOUSE_STATE_RIGHT_BUTTON_DOWN);
+            } else if (gesture.numberOfTouches == 3) {
+                // Phones have no F9 key: a three-finger tap opens the co-op screen.
+                GNW_add_input_buffer(KEY_F9);
             }
             break;
         case kLongPress:
