@@ -1,5 +1,17 @@
 #include "plib/gnw/gpu_fx.h"
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
+// Phones and tablets have OpenGL ES, not the desktop OpenGL these shaders use;
+// there init() just reports it and the processor version is kept.
+#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
+#define GPUFX_UNAVAILABLE 1
+#endif
+
+#ifndef GPUFX_UNAVAILABLE
+
 #include <SDL_opengl.h>
 
 #include <stdio.h>
@@ -684,3 +696,45 @@ void present(SDL_Renderer* renderer, SDL_Window* window, const uint32_t* pixels,
 
 } // namespace gpufx
 } // namespace fallout
+
+#else // GPUFX_UNAVAILABLE
+
+#include <stdio.h>
+
+namespace fallout {
+namespace gpufx {
+
+bool init(int srcWidth, int srcHeight, char* error, int errorSize)
+{
+    if (error != NULL && errorSize > 0) {
+        snprintf(error, errorSize, "no desktop OpenGL on this device");
+    }
+    return false;
+}
+
+void shutdown()
+{
+}
+
+bool ready()
+{
+    return false;
+}
+
+const char* driverInfo()
+{
+    return "none (mobile)";
+}
+
+void present(SDL_Renderer* renderer, SDL_Window* window, const uint32_t* pixels, int pitchBytes, int mode, bool changed)
+{
+}
+
+void setOverlay(const uint32_t* argb, int width, int height)
+{
+}
+
+} // namespace gpufx
+} // namespace fallout
+
+#endif // GPUFX_UNAVAILABLE
