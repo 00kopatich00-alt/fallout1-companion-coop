@@ -1,0 +1,24 @@
+# HOST: a save with party companions (slot 7): list them, then play on its own (travel, encounters, fights)
+# while the drift check watches the companions on both PCs.
+log host: companions (save slot 7)
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+keys down 6
+wait 800
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_host
+wait_for 120000 host: friend connected
+wait 8000
+list_party
+godmode on
+explore 360 4242
+list_party
+expect_not CRASH
+expect_not HANG
+quit

@@ -1,0 +1,21 @@
+# HOST: travels the wasteland; the friend drops out while the party is on the world map and rejoins.
+log host: rejoin while travelling
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_host
+wait_for 120000 host: friend connected
+wait 8000
+godmode on
+explore 300 4242
+expect Your friend disconnected
+wait 90000
+expect_not CRASH
+expect_not HANG
+quit

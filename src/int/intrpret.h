@@ -202,6 +202,9 @@ void executeProcedure(Program* program, int procedureIndex);
 void runProgram(Program* program);
 Program* runScript(char* name);
 void interpretSetCPUBurstSize(int value);
+// Coop: log the game opcodes this program runs from now on (NULL stops).
+void interpretTraceProgram(Program* program);
+bool interpretIsTraced(Program* program);
 void updatePrograms();
 void clearPrograms();
 void clearTopProgram();

@@ -104,6 +104,10 @@ bool coopnet_is_connected();
 // yet (host: not yet spawned/found; client: not yet resolved from handshake).
 Object* coopnet_get_companion();
 
+// Host: true when the friend's character is on the current map and its data can be used (false while
+// a map loads or the party is on the world map, between maps).
+bool coopnet_companion_is_current();
+
 // Called from gmouse.cc when the local role is Client: instead of moving the
 // client's own (mirrored, non-authoritative) obj_dude, sends the clicked tile
 // as a move-intent for the companion to the host.
@@ -453,6 +457,9 @@ void coopnet_notify_dialogue_end();
 // conversation driven by the client, and the filter gDialogProcess() applies
 // to its own input while the client drives.
 void coopnet_on_client_talk_click(Object* target);
+
+// Host: shows a line in the client's message box.
+void coopnet_host_tell_client(const char* text);
 void coopnet_mark_dialogue_client_initiated(Object* npc);
 bool coopnet_on_client_dialogue_key(int keyCode);
 bool coopnet_dialogue_driven_by_client();

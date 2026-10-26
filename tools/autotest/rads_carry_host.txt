@@ -1,0 +1,31 @@
+# HOST: poison, radiation and items on both characters, then lethal radiation
+log host: rads and poison
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_host
+wait_for 120000 host: friend connected
+wait 8000
+log the friend's character gets radiation sickness, then the party changes map
+rads companion 350
+poison companion 40
+time 48
+wait 2000
+expect Coop-effects: radiation sickness level
+dump_companion
+log walk to the next map (the friend's character is rebuilt there)
+godmode on
+explore 90 4242
+wait 4000
+expect Coop-effects: carried over
+expect put back on the rebuilt character
+dump_companion
+expect_not CRASH
+expect_not HANG
+quit

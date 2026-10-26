@@ -1,0 +1,19 @@
+# HOST: stays put while the friend tries the traders nearby.
+log host: traders
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_host
+wait_for 120000 host: friend connected
+wait 8000
+holster companion
+wait 200000
+expect_not CRASH
+expect_not HANG
+quit

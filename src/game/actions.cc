@@ -1950,7 +1950,9 @@ int action_talk_to(Object* a1, Object* a2)
         register_begin(ANIMATION_REQUEST_RESERVED);
         register_object_move_to_object(a1, a2, a1->data.critter.combat.ap, 0);
     } else {
-        register_begin(a1 == obj_dude ? ANIMATION_REQUEST_RESERVED : ANIMATION_REQUEST_UNRESERVED);
+        // Coop: the same (reserved) request for the friend's character as for the host's -- an unreserved one
+        // could be dropped, and the friend then never walked over to the person it clicked.
+        register_begin(ANIMATION_REQUEST_RESERVED);
 
         if (obj_dist(a1, a2) >= 9 || combat_is_shot_blocked(a1, a1->tile, a2->tile, a2, NULL)) {
             register_object_run_to_object(a1, a2, -1, 0);
@@ -1968,11 +1970,21 @@ static int can_talk_to(Object* a1, Object* a2)
     MessageListItem messageListItem;
 
     if (combat_is_shot_blocked(a1, a1->tile, a2->tile, a2, NULL) || obj_dist(a1, a2) >= 9) {
+        // You cannot get there. (used in actions.c)
+        messageListItem.num = 2000;
         if (a1 == obj_dude) {
-            // You cannot get there. (used in actions.c)
-            messageListItem.num = 2000;
+            debug_printf("\nCoop: the host cannot reach pid %d to talk (distance %d, blocked %d)\n",
+                a2->pid, obj_dist(a1, a2), combat_is_shot_blocked(a1, a1->tile, a2->tile, a2, NULL) ? 1 : 0);
             if (message_search(&misc_message_file, &messageListItem)) {
                 display_print(messageListItem.text);
+            }
+        } else if (a1 == coopnet_get_companion()) {
+            // Coop: the friend asked to talk and cannot reach the person (a counter or wall in the way,
+            // or too far): tell it so instead of silently doing nothing.
+            debug_printf("\nCoop: the friend cannot reach pid %d to talk (distance %d, blocked %d)\n",
+                a2->pid, obj_dist(a1, a2), combat_is_shot_blocked(a1, a1->tile, a2->tile, a2, NULL) ? 1 : 0);
+            if (message_search(&misc_message_file, &messageListItem)) {
+                coopnet_host_tell_client(messageListItem.text);
             }
         }
 

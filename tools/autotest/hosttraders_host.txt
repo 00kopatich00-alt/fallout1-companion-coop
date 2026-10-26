@@ -1,0 +1,40 @@
+# HOST: tries to reach and talk to the far traders itself (2 and 4), to compare with the friend.
+log host: host traders
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_host
+wait_for 120000 host: friend connected
+log host tries trader 2
+talk_barterer 2
+wait 20000
+shot h_trader_2
+key esc
+wait 1500
+key 0
+wait 3000
+log host tries trader 4
+talk_barterer 4
+wait 20000
+shot h_trader_4
+key esc
+wait 1500
+key 0
+wait 3000
+log host tries trader 3
+talk_barterer 3
+wait 20000
+shot h_trader_3
+key esc
+wait 1500
+key 0
+wait 3000
+expect_not CRASH
+expect_not HANG
+quit

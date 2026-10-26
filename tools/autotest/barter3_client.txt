@@ -1,0 +1,40 @@
+# CLIENT: trades first (drives the barter screen) and drags an item.
+log client: barter (friend first)
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_join 127.0.0.1
+wait_for 120000 client: HELLO_ACK received
+wait_for 60000 client: map
+wait 14000
+log PHASE A: the friend starts a conversation with the merchant and trades
+talk_barterer
+wait_for 30000 Coop: received DIALOGUE_BEGIN
+wait 4000
+shot c_a1_talk
+click 600 341
+wait 4000
+log second try: the barter command
+barter
+wait 5000
+wait 4000
+shot c_a2_barter
+drag 140 355 270 360
+wait 3000
+shot c_a3_dragged
+key esc
+wait 3000
+shot c_a4_closed
+key esc
+wait 3000
+key 0
+wait 60000
+expect_not CRASH
+expect_not HANG
+quit

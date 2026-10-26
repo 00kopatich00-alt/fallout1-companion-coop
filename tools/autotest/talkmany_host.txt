@@ -1,0 +1,50 @@
+# HOST: waits while the friend talks to a trader 4 times, then talks to the same one 4 times.
+log host: talk many
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_host
+wait_for 120000 host: friend connected
+wait 8000
+holster companion
+wait 2000
+log PHASE A: the friend talks (hands empty)
+wait 110000
+log PHASE B: the host talks
+talk_barterer
+wait 9000
+key esc
+wait 1500
+key 0
+wait 2500
+wait 2000
+talk_barterer
+wait 9000
+key esc
+wait 1500
+key 0
+wait 2500
+wait 2000
+talk_barterer
+wait 9000
+key esc
+wait 1500
+key 0
+wait 2500
+wait 2000
+talk_barterer
+wait 9000
+key esc
+wait 1500
+key 0
+wait 2500
+wait 2000
+expect_not CRASH
+expect_not HANG
+quit

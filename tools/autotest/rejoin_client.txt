@@ -1,0 +1,43 @@
+# CLIENT: drops the connection and rejoins three times (conversation, combat turn, world map).
+log client: rejoin
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_join 127.0.0.1
+wait_for 120000 client: HELLO_ACK received
+godmode on
+wait_for 120000 Coop: received DIALOGUE_BEGIN
+wait 2000
+log drop in the middle of the conversation
+coop_drop
+wait 6000
+coop_join 127.0.0.1
+wait_for 60000 client: HELLO_ACK received
+explore 40 777
+wait_for 120000 myTurnActive=1
+wait 1500
+log drop during my combat turn
+coop_drop
+wait 6000
+coop_join 127.0.0.1
+wait_for 60000 client: HELLO_ACK received
+explore 100 777
+expect myTurnActive=1
+wait_for 200000 Coop: received WORLDMAP_BEGIN
+wait 3000
+log drop while the party travels
+coop_drop
+wait 6000
+coop_join 127.0.0.1
+wait_for 90000 client: HELLO_ACK received
+wait 20000
+shot c_end
+expect_not CRASH
+expect_not HANG
+quit

@@ -81,6 +81,21 @@ char* critter_kill_name(int critter_type);
 char* critter_kill_info(int critter_type);
 int critter_heal_hours(Object* critter, int hours);
 void critter_kill(Object* critter, int anim, bool refresh_window);
+
+// Coop: a critter's radiation and poison with their pending timers, to carry them over to a new
+// object (the friend's character is recreated on every map change) or into a save.
+typedef struct CritterBodyEffects {
+    int rads;
+    int poison;
+    int poisonDelay; // -1 = no poison timer
+    int radLevel;
+    int radIsHealing; // 1: the sickness of radLevel is in effect and heals when the timer runs
+    int radDelay; // -1 = no radiation timer
+} CritterBodyEffects;
+
+void critter_capture_body_effects(Object* obj, CritterBodyEffects* out);
+void critter_restore_body_effects(Object* obj, const CritterBodyEffects* in);
+void critter_reapply_rad_penalty(Object* obj);
 int critter_kill_exps(Object* critter);
 bool critter_is_active(Object* critter);
 bool critter_is_dead(Object* critter);

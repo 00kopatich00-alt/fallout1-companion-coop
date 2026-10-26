@@ -1,0 +1,37 @@
+# CLIENT: watches the host trade, then trades itself (drives the barter screen) and drags an item.
+log client: barter
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_join 127.0.0.1
+wait_for 120000 client: HELLO_ACK received
+wait_for 60000 remote screen began on client
+wait 3000
+shot c_a1_watching_host_barter
+wait 40000
+log PHASE B: the friend starts a conversation with the merchant and trades
+talk_barterer
+wait 12000
+shot c_b1_talk
+barter
+wait 6000
+shot c_b2_barter
+drag 60 400 260 400
+wait 3000
+shot c_b3_dragged
+key esc
+wait 3000
+shot c_b4_closed
+key esc
+wait 3000
+key 0
+wait 4000
+expect_not CRASH
+expect_not HANG
+quit

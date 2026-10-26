@@ -46,6 +46,9 @@ static opcode_t popShortStack(unsigned char* a1, int* a2);
 static void detachProgram(Program* program);
 static void purgeProgram(Program* program);
 static opcode_t getOp(Program* program);
+// Coop: a script whose game opcodes are written to the debug log (finding why an NPC acts differently).
+static Program* g_coopTraceProgram = NULL;
+static int g_coopTraceCount = 0;
 static void checkProgramStrings(Program* program);
 static void op_noop(Program* program);
 static void op_const(Program* program);
@@ -2613,6 +2616,12 @@ void interpret(Program* program, int a2)
             interpretError(err);
         }
 
+        // Coop: game opcodes of one traced script (see interpretTraceProgram()).
+        if (program == g_coopTraceProgram && opcodeIndex >= 0xA0 && g_coopTraceCount < 400) {
+            g_coopTraceCount++;
+            debug_printf("Coop-op %x\n", opcode);
+        }
+
         handler(program);
     }
 
@@ -2935,6 +2944,17 @@ Program* runScript(char* name)
 }
 
 // 0x461F18
+void interpretTraceProgram(Program* program)
+{
+    g_coopTraceProgram = program;
+    g_coopTraceCount = 0;
+}
+
+bool interpretIsTraced(Program* program)
+{
+    return program != NULL && program == g_coopTraceProgram;
+}
+
 void interpretSetCPUBurstSize(int value)
 {
     if (value < 1) {

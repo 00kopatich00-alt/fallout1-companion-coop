@@ -2640,6 +2640,29 @@ int combat_attack(Object* attacker, Object* defender, int hitMode, int hitLocati
         critter_set_who_hit_me(attacker, defender);
     }
 
+    // Coop: what each of the friend's attacks came to, with the perks and traits it has -- so a test
+    // fight shows whether they work for the friend's character (hits, damage, criticals, AP cost).
+    if (coopnet_get_role() == CoopRole::Host && attacker == coopnet_get_companion()) {
+        char owned[200] = "";
+        size_t used = 0;
+        for (int perk = 0; perk < PERK_COUNT && used < sizeof(owned) - 12; perk++) {
+            int rank = perk_level_of(attacker, perk);
+            if (rank > 0) {
+                used += snprintf(owned + used, sizeof(owned) - used, "p%d=%d ", perk, rank);
+            }
+        }
+        for (int trait = 0; trait < TRAIT_COUNT && used < sizeof(owned) - 12; trait++) {
+            if (trait_level_of(attacker, trait)) {
+                used += snprintf(owned + used, sizeof(owned) - used, "t%d ", trait);
+            }
+        }
+        debug_printf("\nCoop-perk: friend attack: mode %d, location %d, hit %d, damage %d, critical %d, rounds %d, AP cost %d (left %d), melee damage %d, critical chance %d, target DT %d DR %d | %s\n",
+            main_ctd.hitMode, main_ctd.defenderHitLocation, (main_ctd.attackerFlags & DAM_HIT) != 0 ? 1 : 0,
+            main_ctd.defenderDamage, (main_ctd.attackerFlags & DAM_CRITICAL) != 0 ? 1 : 0, main_ctd.ammoQuantity,
+            actionPoints, attacker->data.critter.combat.ap, stat_level(attacker, STAT_MELEE_DAMAGE), stat_level(attacker, STAT_CRITICAL_CHANCE),
+            stat_level(defender, STAT_DAMAGE_THRESHOLD), stat_level(defender, STAT_DAMAGE_RESISTANCE), owned);
+    }
+
     combat_call_display = 1;
     combat_cleanup_enabled = 1;
     debug_printf("running attack...\n");

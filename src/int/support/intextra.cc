@@ -1035,6 +1035,9 @@ static void op_obj_item_subtype(Program* program)
         }
     }
 
+    if (interpretIsTraced(program)) {
+        debug_printf("Coop-op   obj_item_subtype(pid %d) = %d\n", obj != NULL ? obj->pid : -1, itemType);
+    }
     programStackPushInteger(program, itemType);
 }
 
@@ -1613,6 +1616,8 @@ static void op_start_gdialog(Program* program)
     Object* obj = static_cast<Object*>(programStackPopPointer(program));
     programStackPopInteger(program);
 
+    // Coop: traced, to tell an NPC that never tries to talk from one that is stopped here.
+    debug_printf("\nCoop-talk: a script opens a conversation (combat %d, head %d)\n", isInCombat() ? 1 : 0, headId);
     if (isInCombat()) {
         return;
     }
@@ -2597,6 +2602,15 @@ static void op_critter_inven_obj(Program* program)
     int type = programStackPopInteger(program);
     Object* critter = static_cast<Object*>(programStackPopPointer(program));
 
+    if (interpretIsTraced(program)) {
+        debug_printf("Coop-op   critter_inven_obj(pid %d, slot %d) -- right hand pid %d, left hand pid %d, worn pid %d, interface hand %d\n",
+            critter != NULL ? critter->pid : -1, type,
+            critter != NULL && inven_right_hand(critter) != NULL ? inven_right_hand(critter)->pid : -1,
+            critter != NULL && inven_left_hand(critter) != NULL ? inven_left_hand(critter)->pid : -1,
+            critter != NULL && inven_worn(critter) != NULL ? inven_worn(critter)->pid : -1,
+            intface_is_item_right_hand());
+    }
+
     if (PID_TYPE(critter->pid) == OBJ_TYPE_CRITTER) {
         switch (type) {
         case INVEN_TYPE_WORN:
@@ -2689,6 +2703,8 @@ static void op_float_msg(Program* program)
         string = interpretGetString(program, stringValue.opcode, stringValue.integerValue);
     }
     Object* obj = static_cast<Object*>(programStackPopPointer(program));
+    // Coop: traced -- an NPC that answers a Talk with a floating line instead of a conversation.
+    debug_printf("\nCoop-talk: floating line from pid %d: %.60s\n", obj != NULL ? obj->pid : -1, string != NULL ? string : "");
 
     int color = colorTable[32747];
     int a5 = colorTable[0];

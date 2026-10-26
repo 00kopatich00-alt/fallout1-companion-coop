@@ -30,6 +30,11 @@ bool autotest_hidden();
 // 6 eyes, 7 groin), or -1 when the player picks it in the called-shot window.
 int autotest_called_shot();
 
+// The mouse buttons (1 left, 2 right) and keys the script is holding down right now -- input it feeds into
+// the engine, which SDL's own hardware state does not show.
+int autotest_mouse_buttons();
+bool autotest_key_held(int scancode);
+
 // True when --autotest-pos=x,y was given: where to put the game window (two games side by side for a recording).
 bool autotest_window_position(int* x, int* y);
 

@@ -367,6 +367,11 @@ int gtime_q_process(Object* obj, void* data)
 
     rc = critter_check_rads(obj_dude);
 
+    // Coop: the friend's character gets its own radiation check (see critter_has_body_effects()).
+    if (coopnet_companion_is_current()) {
+        critter_check_rads(coopnet_get_companion());
+    }
+
     queue_clear_type(EVENT_TYPE_GAME_TIME, NULL);
 
     gtime_q_add();

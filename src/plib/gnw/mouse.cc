@@ -433,7 +433,13 @@ void mouse_info()
     // While the host mirrors a screen for the coop driver, the driver's
     // injected mouse owns the pointer: polling the real (idle) mouse here would
     // overwrite each injected button press with "no buttons" straight away.
+    // The once-a-frame update still has to happen, with the driver's buttons:
+    // skipping it left a "button went down" event standing for frame after
+    // frame -- a dragged item was picked up and dropped over and over, and a
+    // held scroll arrow scrolled every frame (found in play: "the item jumped
+    // and had to be dragged several times", "barter scrolling too fast").
     if (coopnet_remote_host_owns_mouse()) {
+        mouse_simulate_input(0, 0, last_buttons);
         return;
     }
 

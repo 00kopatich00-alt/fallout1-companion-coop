@@ -1,0 +1,36 @@
+# HOST: waits while the friend trades with a merchant (it drives the screen), then trades itself.
+log host: barter (friend first)
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_host
+wait_for 120000 host: friend connected
+wait 8000
+give dude 41 500
+give companion 41 300
+give companion 40 3
+wield companion 8 29
+log PHASE A: the friend trades first
+wait 70000
+log PHASE B: the host trades
+talk_barterer
+wait 12000
+shot h_b1_talk
+barter
+wait 5000
+shot h_b2_barter
+key esc
+wait 3000
+key esc
+wait 2000
+key 0
+wait 4000
+expect_not CRASH
+expect_not HANG
+quit

@@ -1,0 +1,44 @@
+# CLIENT: gets perks and traits (ranged), then fights.
+log client: perks ranged
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_join 127.0.0.1
+wait_for 120000 client: HELLO_ACK received
+wait_for 60000 client: map
+wait 2000
+perk bonus_ranged_damage 2
+perk more_criticals 2
+perk better_criticals 1
+perk sniper 1
+perk sharpshooter 1
+perk bonus_rate_of_fire 1
+perk action_boy 2
+perk bonus_move 1
+trait finesse kamikaze
+char_changed
+wait 4000
+dump_dude
+godmode on
+wait_for 60000 Coop: received COMBAT_BEGIN
+wait_for 60000 myTurnActive=1
+wait 1500
+cursor attack
+aim on
+called_shot head
+hover_enemy
+wait 900
+click_here
+wait 5000
+aim off
+called_shot off
+explore 160 777
+expect_not CRASH
+expect_not HANG
+quit

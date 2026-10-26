@@ -169,9 +169,13 @@ int queue_save(DB_FILE* stream)
 
     int count = 0;
 
+    // Coop: timers of objects that are never saved (the friend's character on the host) are left out:
+    // loaded back, they would have no owner and run on nothing.
     queueListNode = queue;
     while (queueListNode != NULL) {
-        count += 1;
+        if (queueListNode->owner == NULL || (queueListNode->owner->flags & OBJECT_NO_SAVE) == 0) {
+            count += 1;
+        }
         queueListNode = queueListNode->next;
     }
 
@@ -182,6 +186,10 @@ int queue_save(DB_FILE* stream)
     queueListNode = queue;
     while (queueListNode != NULL) {
         Object* object = queueListNode->owner;
+        if (object != NULL && (object->flags & OBJECT_NO_SAVE) != 0) {
+            queueListNode = queueListNode->next;
+            continue;
+        }
         int objectId = object != NULL ? object->id : -2;
 
         if (db_fwriteInt(stream, queueListNode->time) == -1) {
@@ -319,6 +327,22 @@ bool queue_find(Object* owner, int eventType)
     }
 
     return false;
+}
+
+// Coop: the first pending event of this type for this owner: how long until it runs (game ticks,
+// never below 1) and its data; -1 when there is none.
+int queue_find_delay(Object* owner, int eventType, void** dataPtr)
+{
+    for (QueueListNode* node = queue; node != NULL; node = node->next) {
+        if (node->owner == owner && node->type == eventType) {
+            if (dataPtr != NULL) {
+                *dataPtr = node->data;
+            }
+            int delay = node->time - static_cast<int>(game_time());
+            return delay > 0 ? delay : 1;
+        }
+    }
+    return -1;
 }
 
 // 0x4909E4

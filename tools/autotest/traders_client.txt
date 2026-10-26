@@ -1,0 +1,58 @@
+# CLIENT: talks to each of the 5 nearest traders in turn.
+log client: traders
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_join 127.0.0.1
+wait_for 120000 client: HELLO_ACK received
+wait_for 60000 client: map
+wait 14000
+log trying trader 0
+talk_barterer 0
+wait 18000
+shot c_trader_0
+key esc
+wait 1500
+key 0
+wait 4000
+log trying trader 1
+talk_barterer 1
+wait 18000
+shot c_trader_1
+key esc
+wait 1500
+key 0
+wait 4000
+log trying trader 2
+talk_barterer 2
+wait 18000
+shot c_trader_2
+key esc
+wait 1500
+key 0
+wait 4000
+log trying trader 3
+talk_barterer 3
+wait 18000
+shot c_trader_3
+key esc
+wait 1500
+key 0
+wait 4000
+log trying trader 4
+talk_barterer 4
+wait 18000
+shot c_trader_4
+key esc
+wait 1500
+key 0
+wait 4000
+expect_not CRASH
+expect_not HANG
+quit

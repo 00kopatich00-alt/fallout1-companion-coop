@@ -1,0 +1,30 @@
+# HOST: quest state and experience must match on both PCs: at the start, after a quest step + XP, after travel.
+log host: quests
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_host
+wait_for 120000 host: friend connected
+wait 10000
+log A: right after the friend joined
+quest_state
+quest_step 1
+xp 150
+wait 10000
+log B: after a quest step and 150 XP
+quest_state
+godmode on
+explore 150 4242
+wait 6000
+log C: after travelling
+quest_state
+wait 40000
+expect_not CRASH
+expect_not HANG
+quit

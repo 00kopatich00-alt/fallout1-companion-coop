@@ -1,5 +1,6 @@
 #include "game/coop_autotest.h"
 
+#include <algorithm>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -13,6 +14,7 @@
 
 #include "game/actions.h"
 #include "game/anim.h"
+#include "game/game.h"
 #include "game/gdialog.h"
 #include "game/worldmap.h"
 #include "game/combat.h"
@@ -86,6 +88,7 @@ uint32_t g_stepDue = 0;
 int g_buttons = 0;
 bool g_abortOnFail = false;
 bool g_godMode = false;
+bool g_keyHeld[512] = { false }; // keys the script holds down (see autotest_key_held())
 
 // Where the log stood when the script last pressed or clicked something: a wait_for after it also
 // sees what the press itself caused (loading a save prints its lines before the next command runs).
@@ -243,6 +246,9 @@ void apply_step(const Step& step)
         data.key = step.a;
         data.down = step.kind == STEP_KEY_DOWN ? 1 : 0;
         kb_simulate_key(&data);
+        if (step.a >= 0 && step.a < 512) {
+            g_keyHeld[step.a] = data.down != 0;
+        }
         break;
     }
     case STEP_MOUSE_MOVE: {
@@ -511,7 +517,12 @@ void explore_decide(uint32_t now)
             explore_inject("wait 3000");
             return;
         }
-        if (g_exploreCombatRounds % 5 != 0 && explore_find_enemy() != NULL) {
+        // The last shot was refused for lack of action points: end the turn like a player would.
+        static size_t attackMark = 0;
+        bool outOfAp = attackMark != 0 && (log_contains_since("attack not sent", attackMark) || log_contains_since("check=3", attackMark));
+        attackMark = 0;
+        if (!outOfAp && g_exploreCombatRounds % 5 != 0 && explore_find_enemy() != NULL) {
+            attackMark = log_position();
             explore_inject("cursor attack");
             explore_inject("hover_enemy");
             explore_inject("wait 900");
@@ -525,7 +536,16 @@ void explore_decide(uint32_t now)
     }
 
     if (client) {
-        return; // the client follows the host between fights
+        // Between fights the friend walks after the host like a player would (its character only
+        // moves when told to, so without this it stayed behind and missed every fight).
+        Object* me = coopnet_get_view_companion();
+        if (me != NULL && obj_dude != NULL && me->elevation == obj_dude->elevation && !anim_busy(me)
+            && tile_dist(me->tile, obj_dude->tile) > 4 && !world_map_screen_open()) {
+            int target = tile_num_in_direction(obj_dude->tile, explore_random(6), 2);
+            coopnet_on_client_click(target >= 0 ? target : obj_dude->tile);
+            explore_inject("wait 2000");
+        }
+        return;
     }
 
     // Peaceful on a map: go to the nearest exit grid; if that goes nowhere, stroll somewhere else first.
@@ -682,7 +702,16 @@ void execute_line(const std::string& rawLine, uint32_t now)
         } else {
             check_failed("coop_host could not start hosting");
         }
+    } else if (cmd == "coop_drop") {
+        // The connection drops (a Wi-Fi hiccup, a cable pulled): the session is closed at once, no goodbye.
+        g_actionMark = log_position();
+        g_haveActionMark = true;
+        coopnet_shutdown();
+        check_passed("coop_drop");
     } else if (cmd == "coop_join" && w.size() >= 2) {
+        // A later wait_for must see only what this join causes, not an earlier session's lines.
+        g_actionMark = log_position();
+        g_haveActionMark = true;
         bool ok = coopnet_start_client(w[1].c_str(), w.size() >= 3 ? atoi(w[2].c_str()) : 29999);
         if (ok) {
             check_passed("coop_join " + w[1]);
@@ -771,6 +800,33 @@ void execute_line(const std::string& rawLine, uint32_t now)
             check_passed("spawn " + std::to_string(made) + " critter(s) of pid " + w[1]);
         } else {
             check_failed("spawn pid " + w[1] + " found no free tile");
+        }
+    } else if (cmd == "spawn_follower" && w.size() >= 2) {
+        // spawn_follower <critter pid>: a character that joins the host's party and follows it, like Ian.
+        int pid = atoi(w[1].c_str());
+        Object* follower = NULL;
+        for (int ring = 2; ring < 8 && follower == NULL; ring++) {
+            for (int dir = 0; dir < 6 && follower == NULL; dir++) {
+                int tile = tile_num_in_direction(obj_dude->tile, dir, ring);
+                if (tile == -1 || obj_blocking_at(NULL, tile, obj_dude->elevation) != NULL) {
+                    continue;
+                }
+                if (obj_pid_new(&follower, pid) == -1 || follower == NULL) {
+                    follower = NULL;
+                    break;
+                }
+                Rect rect;
+                obj_move_to_tile(follower, tile, obj_dude->elevation, &rect);
+            }
+        }
+        if (follower == NULL) {
+            check_failed("spawn_follower pid " + w[1] + " failed");
+        } else {
+            follower->data.critter.combat.team = obj_dude->data.critter.combat.team;
+            int rc = partyMemberAdd(follower);
+            tile_refresh_display();
+            result_line("NOTE follower pid %d id %d on tile %d, party add rc %d", follower->pid, follower->id, follower->tile, rc);
+            check_passed("spawn_follower " + w[1]);
         }
     } else if (cmd == "start_combat") {
         scripts_request_combat(NULL);
@@ -934,6 +990,17 @@ void execute_line(const std::string& rawLine, uint32_t now)
             tile_refresh_display();
             check_passed("wield " + w[1] + " pid " + w[2]);
         }
+    } else if (cmd == "holster" && w.size() >= 2) {
+        // holster <dude|companion>: nothing in either hand (people don't talk to someone holding a weapon).
+        Object* who = w[1] == "dude" ? obj_dude : coopnet_get_companion();
+        if (who == NULL) {
+            check_failed("holster: no " + w[1]);
+        } else {
+            inven_unwield(who, 0);
+            inven_unwield(who, 1);
+            tile_refresh_display();
+            check_passed("holster " + w[1]);
+        }
     } else if (cmd == "movie" && w.size() >= 2) {
         // Play a cutscene by its number on this game (on the host the client plays it too).
         int rc = gmovie_play(atoi(w[1].c_str()), GAME_MOVIE_FADE_IN | GAME_MOVIE_FADE_OUT | GAME_MOVIE_STOP_MUSIC);
@@ -1076,6 +1143,69 @@ void execute_line(const std::string& rawLine, uint32_t now)
         } else {
             check_passed(cmd);
         }
+    } else if (cmd == "talk_barterer") {
+        // talk_barterer [n]: start a conversation with the n-th nearest person who trades (0 = nearest);
+        // the client asks the host, and drives it. Every candidate is listed once in the log.
+        Object* me = coopnet_get_role() == CoopRole::Client ? coopnet_get_view_companion() : obj_dude;
+        int wanted = w.size() >= 2 ? atoi(w[1].c_str()) : 0;
+        std::vector<std::pair<int, Object*>> found;
+        for (Object* o = obj_find_first_at(map_elevation); o != NULL; o = obj_find_next_at()) {
+            if (FID_TYPE(o->fid) != OBJ_TYPE_CRITTER || o == obj_dude || o == coopnet_get_companion() || o->tile == -1
+                || (o->flags & OBJECT_HIDDEN) != 0 || critter_is_dead(o) || (o->sid == -1 && coopnet_get_role() != CoopRole::Client) || isPartyMember(o)) {
+                continue;
+            }
+            Proto* proto = NULL;
+            if (proto_ptr(o->pid, &proto) == -1 || proto == NULL || (proto->critter.data.flags & CRITTER_BARTER) == 0) {
+                continue;
+            }
+            found.push_back(std::make_pair(me != NULL ? tile_dist(o->tile, me->tile) : 0, o));
+        }
+        std::sort(found.begin(), found.end(), [](const std::pair<int, Object*>& a, const std::pair<int, Object*>& b) { return a.first < b.first; });
+        for (size_t i = 0; i < found.size() && i < 8; i++) {
+            result_line("NOTE trader %d: pid %d at distance %d", static_cast<int>(i), found[i].second->pid, found[i].first);
+        }
+        Object* best = wanted >= 0 && wanted < static_cast<int>(found.size()) ? found[wanted].second : NULL;
+        int bestDistance = best != NULL ? found[wanted].first : 0;
+        if (best == NULL) {
+            check_failed("talk_barterer: nobody here trades");
+        } else {
+            result_line("NOTE barterer pid %d at distance %d", best->pid, bestDistance);
+            g_actionMark = log_position();
+            g_haveActionMark = true;
+            if (coopnet_get_role() == CoopRole::Client) {
+                coopnet_on_client_talk_click(best);
+            } else {
+                action_talk_to(obj_dude, best); // walks up first, like a click on the person
+            }
+            check_passed("talk_barterer");
+        }
+    } else if (cmd == "barter") {
+        // Press the conversation's Barter button.
+        g_actionMark = log_position();
+        g_haveActionMark = true;
+        if (coopnet_get_role() == CoopRole::Client) {
+            coopnet_on_client_dialogue_command(2);
+        } else {
+            gdActivateBarter(0);
+        }
+        check_passed("barter");
+    } else if (cmd == "quest_state") {
+        // A fingerprint of every global variable (quests, story, karma...) and this player's experience:
+        // host and client must show the same fingerprint once the host's changes have been sent.
+        uint32_t hash = 2166136261u;
+        for (int i = 0; i < num_game_global_vars; i++) {
+            hash = (hash ^ static_cast<uint32_t>(game_global_vars[i])) * 16777619u;
+        }
+        result_line("QUEST-STATE vars %d hash %08x, experience %d, level %d", num_game_global_vars, hash,
+            stat_pc_get(PC_STAT_EXPERIENCE), stat_pc_get(PC_STAT_LEVEL));
+        check_passed("quest_state");
+    } else if (cmd == "quest_step" && w.size() >= 2) {
+        // quest_step <+n>: move the last global variable on by n (stands in for a quest advancing on the host).
+        int index = num_game_global_vars - 1;
+        int value = game_get_global_var(index) + atoi(w[1].c_str());
+        game_set_global_var(index, value);
+        result_line("NOTE global variable %d set to %d", index, value);
+        check_passed("quest_step " + w[1]);
     } else if (cmd == "list_dead") {
         // Every dead critter on this map (a corpse of the friend's character where none should be shows up here).
         int dead = 0;
@@ -1209,6 +1339,16 @@ bool autotest_active()
 bool autotest_hidden()
 {
     return g_active && g_hidden;
+}
+
+int autotest_mouse_buttons()
+{
+    return g_active ? g_buttons : 0;
+}
+
+bool autotest_key_held(int scancode)
+{
+    return g_active && scancode >= 0 && scancode < 512 && g_keyHeld[scancode];
 }
 
 int autotest_called_shot()

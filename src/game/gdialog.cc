@@ -721,7 +721,30 @@ void gdialog_enter(Object* target, int a2)
                 }
             }
         }
+        // Coop: in a conversation the client drives, its character is the one talking. NPC scripts
+        // ask about "the player" (dude_obj) all the time -- how far away it stands, its speech
+        // skill, gender -- and with the host's character (often far off) in that role many NPCs
+        // just did not talk to the friend at all ("people deciding not to talk", found by the
+        // barter autotest). Barter already swaps the player the same way.
+        Object* coopTalkSavedDude = NULL;
+        if (coopnet_get_role() == CoopRole::Host && coopnet_dialogue_driven_by_client() && coopnet_get_companion() != NULL) {
+            coopTalkSavedDude = obj_dude;
+            obj_dude = coopnet_get_companion();
+            debug_printf("\nCoop: the friend's character is the one talking (scripts see it as the player)\n");
+        }
+        debug_printf("\nCoop-talk: talker pid %d, charisma %d, speech %d, NPC reaction %d\n", obj_dude->pid,
+            stat_level(obj_dude, STAT_CHARISMA), skill_level(obj_dude, SKILL_SPEECH), reaction_get(target));
+        Script* traceScript = NULL;
+        if (coopnet_get_role() == CoopRole::Host && scr_ptr(target->sid, &traceScript) != -1 && traceScript->program != NULL) {
+            interpretTraceProgram(traceScript->program);
+            debug_printf("\nCoop-op trace: talk of pid %d (script idx %d)\n", target->pid, traceScript->scr_script_idx);
+        }
         exec_script_proc(target->sid, SCRIPT_PROC_TALK);
+        interpretTraceProgram(NULL);
+        if (coopTalkSavedDude != NULL) {
+            obj_dude = coopTalkSavedDude;
+            inven_set_dude(obj_dude, obj_dude->pid);
+        }
     }
 
     Script* script;
@@ -1612,6 +1635,14 @@ bool coopnet_client_dialogue_hover(int keyCode)
 {
     if (!g_coopClientDialogueVisualActive) {
         return false;
+    }
+    if ((mouse_get_buttons() & (MOUSE_EVENT_LEFT_BUTTON_DOWN | MOUSE_EVENT_LEFT_BUTTON_UP)) != 0) {
+        // Traced: which window a click on the conversation lands in (the Barter button did not react).
+        int mx, my;
+        mouse_get_position(&mx, &my);
+        debug_printf("\nCoop-dlg: click %s at %d,%d, top window %d, conversation window %d (back %d), event %d\n",
+            (mouse_get_buttons() & MOUSE_EVENT_LEFT_BUTTON_DOWN) != 0 ? "down" : "up", mx, my,
+            win_get_top_win(mx, my), dialogueWindow, dialogueBackWindow, keyCode);
     }
     if (keyCode >= 1200 && keyCode <= 1250) {
         gDialogProcessHighlight(keyCode - 1200);
@@ -3326,21 +3357,26 @@ static void talk_to_pressed_barter(int btn, int keyCode)
         // The button press is a driver command for the host, which runs the
         // real trade screen (and streams it back) -- see the remote screen in
         // coopnet.cc.
+        debug_printf("\nCoop-barter: Barter pressed on the client's conversation window\n");
         coopnet_on_client_dialogue_command(2);
         return;
     }
 
     if (PID_TYPE(dialog_target->pid) != OBJ_TYPE_CRITTER) {
+        debug_printf("\nCoop-barter: not a critter, no barter\n");
         return;
     }
 
     Script* script;
     if (scr_ptr(dialog_target->sid, &script) == -1) {
+        debug_printf("\nCoop-barter: no script, no barter\n");
         return;
     }
 
     Proto* proto;
     proto_ptr(dialog_target->pid, &proto);
+    debug_printf("\nCoop-barter: barter asked of pid %d: trades %d, state %d, switch mode %d\n", dialog_target->pid,
+        (proto->critter.data.flags & CRITTER_BARTER) != 0 ? 1 : 0, dialogue_state, dialogue_switch_mode);
     if ((proto->critter.data.flags & CRITTER_BARTER) != 0) {
         if (gdialog_speech_playing) {
             if (soundPlaying(lip_info.sound)) {

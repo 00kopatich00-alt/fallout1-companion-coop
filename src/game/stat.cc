@@ -275,8 +275,13 @@ int stat_get_base_direct(Object* critter, int stat)
 int stat_get_bonus(Object* critter, int stat)
 {
     if (stat >= 0 && stat < SAVEABLE_STAT_COUNT) {
-        Proto* proto;
-        proto_ptr(critter->pid, &proto);
+        // Coop: same guard as stat_get_base_direct() -- a critter whose prototype is gone (the
+        // friend's character after the session ended and a map reloaded) crashed here when an
+        // enemy's attack made everyone around check their perception.
+        Proto* proto = NULL;
+        if (critter == NULL || proto_ptr(critter->pid, &proto) == -1 || proto == NULL) {
+            return 0;
+        }
         return proto->critter.data.bonusStats[stat];
     }
 

@@ -267,6 +267,25 @@ int critter_get_poison(Object* critter)
     return critter->data.critter.poison;
 }
 
+// Coop: radiation and poison work on the host's character AND on the friend's (the companion), on
+// the host, which runs the one real game. Each has its own dose, resistance and timers; the timer
+// callbacks below only touch the events of the critter being handled (coop_effect_owner).
+static Object* coop_effect_owner = NULL;
+
+static bool critter_has_body_effects(Object* obj)
+{
+    if (obj == obj_dude) {
+        return true;
+    }
+    // Only while it is on a map: between maps (the world map) its data is being rebuilt.
+    return obj != NULL && obj == coopnet_get_companion() && coopnet_companion_is_current();
+}
+
+static int event_of_effect_owner(Object* obj, void* data)
+{
+    return obj == coop_effect_owner ? 1 : 0;
+}
+
 // Adjust critter's current poison by specified amount.
 //
 // For unknown reason this function only works on dude.
@@ -279,7 +298,7 @@ int critter_adjust_poison(Object* critter, int amount)
 {
     MessageListItem messageListItem;
 
-    if (critter != obj_dude) {
+    if (!critter_has_body_effects(critter)) {
         return -1;
     }
 
@@ -290,13 +309,18 @@ int critter_adjust_poison(Object* critter, int amount)
 
     critter->data.critter.poison += amount;
     if (critter->data.critter.poison > 0) {
-        queue_clear_type(EVENT_TYPE_POISON, NULL);
-        queue_add(10 * (505 - 5 * critter->data.critter.poison), obj_dude, NULL, EVENT_TYPE_POISON);
+        coop_effect_owner = critter;
+        queue_clear_type(EVENT_TYPE_POISON, event_of_effect_owner);
+        queue_add(10 * (505 - 5 * critter->data.critter.poison), critter, NULL, EVENT_TYPE_POISON);
 
         // You have been poisoned!
-        messageListItem.num = 3000;
-        if (message_search(&misc_message_file, &messageListItem)) {
-            display_print(messageListItem.text);
+        if (critter == obj_dude) {
+            messageListItem.num = 3000;
+            if (message_search(&misc_message_file, &messageListItem)) {
+                display_print(messageListItem.text);
+            }
+        } else {
+            debug_printf("\nCoop-effects: the friend's character is poisoned (%d)\n", critter->data.critter.poison);
         }
     } else {
         critter->data.critter.poison = 0;
@@ -310,12 +334,22 @@ int critter_check_poison(Object* obj, void* data)
 {
     MessageListItem messageListItem;
 
-    if (obj != obj_dude) {
+    if (!critter_has_body_effects(obj)) {
+        if (obj != NULL && obj == coopnet_get_companion() && obj->data.critter.poison > 0) {
+            // Coop: the friend's character is between maps: keep its poison going, check again later.
+            queue_add(GAME_TIME_TICKS_PER_HOUR, obj, NULL, EVENT_TYPE_POISON);
+        }
         return 0;
     }
 
     critter_adjust_poison(obj, -2);
     critter_adjust_hits(obj, -1);
+
+    if (obj != obj_dude) {
+        // The friend's character: no interface or message of the host's to update, and it never
+        // interrupts what the host is doing (resting, travelling).
+        return 0;
+    }
 
     intface_update_hit_points(false);
 
@@ -345,11 +379,23 @@ int critter_adjust_rads(Object* obj, int amount)
     MessageListItem messageListItem;
     Proto* proto;
 
-    if (obj != obj_dude) {
+    if (!critter_has_body_effects(obj)) {
         return -1;
     }
 
-    proto_ptr(obj_dude->pid, &proto);
+    // Coop: the party stands in the same place, so radiation the map or a script gives the host's
+    // character reaches the friend's too (with the friend's own resistance). Medicine does not:
+    // only doses are shared.
+    if (obj == obj_dude && amount > 0 && coopnet_get_role() == CoopRole::Host) {
+        Object* companion = coopnet_get_companion();
+        if (companion != NULL && (companion->data.critter.combat.results & DAM_DEAD) == 0) {
+            critter_adjust_rads(companion, amount);
+        }
+    }
+
+    if (proto_ptr(obj->pid, &proto) == -1) {
+        return -1;
+    }
 
     if (amount > 0) {
         amount -= stat_level(obj, STAT_RADIATION_RESISTANCE) * amount / 100;
@@ -359,7 +405,7 @@ int critter_adjust_rads(Object* obj, int amount)
         proto->critter.data.flags |= CRITTER_BARTER;
     }
 
-    if (amount > 0) {
+    if (amount > 0 && obj == obj_dude) {
         Object* item;
         Object* geiger_counter = NULL;
 
@@ -394,7 +440,11 @@ int critter_adjust_rads(Object* obj, int amount)
         }
     }
 
-    if (amount >= 10) {
+    if (obj != obj_dude && amount > 0) {
+        debug_printf("\nCoop-effects: the friend's character takes %d rads (now %d)\n", amount, obj->data.critter.radiation + amount);
+    }
+
+    if (amount >= 10 && obj == obj_dude) {
         // You have received a large dose of radiation.
         messageListItem.num = 1007;
 
@@ -430,17 +480,20 @@ int critter_check_rads(Object* obj)
     int radiation;
     int radiation_level;
 
-    if (obj != obj_dude) {
+    if (!critter_has_body_effects(obj)) {
         return 0;
     }
 
-    proto_ptr(obj->pid, &proto);
+    if (proto_ptr(obj->pid, &proto) == -1 || proto == NULL) {
+        return 0;
+    }
     if ((proto->critter.data.flags & CRITTER_BARTER) == 0) {
         return 0;
     }
 
     old_rad_level = 0;
 
+    coop_effect_owner = obj;
     queue_clear_type(EVENT_TYPE_RADIATION, get_rad_damage_level);
 
     // NOTE: Uninline
@@ -486,7 +539,9 @@ static int get_rad_damage_level(Object* obj, void* data)
 {
     RadiationEvent* radiationEvent = (RadiationEvent*)data;
 
-    old_rad_level = radiationEvent->radiationLevel;
+    if (obj == coop_effect_owner) {
+        old_rad_level = radiationEvent->radiationLevel;
+    }
 
     return 0;
 }
@@ -495,6 +550,10 @@ static int get_rad_damage_level(Object* obj, void* data)
 static int clear_rad_damage(Object* obj, void* data)
 {
     RadiationEvent* radiationEvent = (RadiationEvent*)data;
+
+    if (obj != coop_effect_owner) {
+        return 0; // another character's timer: keep it
+    }
 
     if (radiationEvent->isHealing) {
         process_rads(obj, radiationEvent->radiationLevel, true);
@@ -516,6 +575,10 @@ static void process_rads(Object* obj, int radiationLevel, bool isHealing)
 
     int radiationLevelIndex = radiationLevel - 1;
     int modifier = isHealing ? -1 : 1;
+
+    if (obj != obj_dude) {
+        debug_printf("\nCoop-effects: radiation sickness level %d %s on pid %d\n", radiationLevel, isHealing ? "heals" : "takes effect", obj->pid);
+    }
 
     if (obj == obj_dude) {
         // Radiation level message, higher is worse.
@@ -555,14 +618,84 @@ static void process_rads(Object* obj, int radiationLevel, bool isHealing)
     }
 }
 
+
+void critter_capture_body_effects(Object* obj, CritterBodyEffects* out)
+{
+    memset(out, 0, sizeof(*out));
+    out->poisonDelay = -1;
+    out->radDelay = -1;
+    if (obj == NULL) {
+        return;
+    }
+    out->rads = obj->data.critter.radiation;
+    out->poison = obj->data.critter.poison;
+    out->poisonDelay = queue_find_delay(obj, EVENT_TYPE_POISON, NULL);
+    void* data = NULL;
+    out->radDelay = queue_find_delay(obj, EVENT_TYPE_RADIATION, &data);
+    if (out->radDelay != -1 && data != NULL) {
+        out->radLevel = ((RadiationEvent*)data)->radiationLevel;
+        out->radIsHealing = ((RadiationEvent*)data)->isHealing;
+    }
+}
+
+void critter_restore_body_effects(Object* obj, const CritterBodyEffects* in)
+{
+    if (obj == NULL) {
+        return;
+    }
+    if (in->rads != 0 || in->poison != 0 || in->radDelay != -1) {
+        debug_printf("\nCoop-effects: carried over: rads %d, poison %d, radiation timer level %d (healing %d) in %d\n",
+            in->rads, in->poison, in->radLevel, in->radIsHealing, in->radDelay);
+    }
+    obj->data.critter.radiation = in->rads;
+    obj->data.critter.poison = in->poison;
+    queue_remove_this(obj, EVENT_TYPE_POISON);
+    queue_remove_this(obj, EVENT_TYPE_RADIATION);
+    if (in->poisonDelay > 0) {
+        queue_add(in->poisonDelay, obj, NULL, EVENT_TYPE_POISON);
+    }
+    if (in->radDelay > 0) {
+        RadiationEvent* radiationEvent = (RadiationEvent*)mem_malloc(sizeof(*radiationEvent));
+        if (radiationEvent != NULL) {
+            radiationEvent->radiationLevel = in->radLevel;
+            radiationEvent->isHealing = in->radIsHealing;
+            queue_add(in->radDelay, obj, radiationEvent, EVENT_TYPE_RADIATION);
+        }
+    }
+}
+
+// The sickness in effect lives in the critter's stat bonuses; the friend's are rebuilt from its
+// character after every map change, so they are put back from the pending healing timer.
+void critter_reapply_rad_penalty(Object* obj)
+{
+    void* data = NULL;
+    if (obj == NULL || queue_find_delay(obj, EVENT_TYPE_RADIATION, &data) == -1 || data == NULL) {
+        return;
+    }
+    RadiationEvent* radiationEvent = (RadiationEvent*)data;
+    if (radiationEvent->isHealing) {
+        process_rads(obj, radiationEvent->radiationLevel, false);
+        debug_printf("\nCoop-effects: radiation sickness level %d put back on the rebuilt character\n", radiationEvent->radiationLevel);
+    }
+}
 // 0x427F94
 int critter_process_rads(Object* obj, void* data)
 {
     RadiationEvent* radiationEvent = (RadiationEvent*)data;
+    if (obj != obj_dude && obj == coopnet_get_companion() && !critter_has_body_effects(obj)) {
+        // Coop: the friend's character is between maps (its data is being rebuilt): try again in an hour.
+        RadiationEvent* later = (RadiationEvent*)mem_malloc(sizeof(*later));
+        if (later != NULL) {
+            *later = *radiationEvent;
+            queue_add(GAME_TIME_TICKS_PER_HOUR, obj, later, EVENT_TYPE_RADIATION);
+        }
+        return 0;
+    }
     if (!radiationEvent->isHealing) {
         // Schedule healing stats event in 7 days.
         RadiationEvent* newRadiationEvent = (RadiationEvent*)mem_malloc(sizeof(*newRadiationEvent));
         if (newRadiationEvent != NULL) {
+            coop_effect_owner = obj;
             queue_clear_type(EVENT_TYPE_RADIATION, clear_rad_damage);
             newRadiationEvent->radiationLevel = radiationEvent->radiationLevel;
             newRadiationEvent->isHealing = 1;

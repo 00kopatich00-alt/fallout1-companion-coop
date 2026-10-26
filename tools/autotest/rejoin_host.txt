@@ -1,0 +1,40 @@
+# HOST: the friend drops out and rejoins three times: in a conversation, during its combat turn, while travelling.
+log host: rejoin
+on_fail continue
+keys space 4
+wait_for 90000 Coop-stage: main menu reached
+wait 1500
+key l
+wait 2500
+key enter
+wait_for 30000 LOADSAVE: Total load data read
+wait 4000
+coop_host
+wait_for 120000 host: friend connected
+wait 8000
+godmode on
+wield dude 8 29
+give dude 29 200
+wield companion 8 29
+give companion 29 200
+log PHASE 1: conversation, the friend drops in the middle of it
+talk
+wait_for 20000 notified peer dialogue began
+wait_for 90000 Your friend disconnected
+wait_for 90000 Your friend connected!
+log the friend is back during the conversation
+wait 6000
+explore 20 4242
+log PHASE 2: fight, the friend drops during its own turn and rejoins
+spawn 16777264 3 4
+wait 2000
+start_fight
+wait_for 30000 notified peer combat began
+explore 150 4242
+expect the friend joined during a fight
+log PHASE 3: travel, the friend drops while the party is on the world map
+explore 150 4242
+wait 180000
+expect_not CRASH
+expect_not HANG
+quit

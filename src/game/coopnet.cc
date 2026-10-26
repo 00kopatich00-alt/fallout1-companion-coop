@@ -47,6 +47,7 @@ typedef int CoopSocket;
 #include "game/combatai.h"
 #include "game/config.h"
 #include "game/critter.h"
+#include "game/queue.h"
 #include "game/cycle.h"
 #include "game/display.h"
 #include "game/gdialog.h"
@@ -1035,6 +1036,7 @@ static int g_coopParticipantCount = 0;
 // COOP_MSG_COMBAT_ACTION -- without this, a message that arrives late (after
 // the turn already moved on) could move the companion out of turn order.
 static bool g_coopHostCombatTurnActive = false;
+static uint32_t g_coopHostCombatResendAtMs = 0; // a friend joined: send it the fight in progress at this time
 
 // Host-side only: set by an incoming COOP_MSG_COMBAT_ACTION with actionType
 // == COOP_COMBAT_ACTION_END_TURN, read and cleared by coopnet_combat_input().
@@ -2127,6 +2129,8 @@ static void coopnet_destroy_companion(Object* companion)
     int tile = companion->tile;
     int elevation = companion->elevation;
 
+    // Its timers (radiation, poison...) would otherwise run on a freed object later.
+    queue_remove(companion);
     companion->flags &= ~OBJECT_NO_REMOVE;
     int rc = obj_erase_object(companion, NULL);
     debug_printf("\nCoop-debug: coopnet_destroy_companion pid=%d tile=%d elevation=%d obj_erase_object rc=%d\n",
@@ -2190,8 +2194,14 @@ static Object* coopnet_respawn_companion(Object* oldCompanion, int pid, int tile
         }
     }
 
+    CritterBodyEffects effects;
+    critter_capture_body_effects(oldCompanion, &effects);
+
     coopnet_destroy_companion(oldCompanion);
     Object* newCompanion = coopnet_find_or_spawn_companion(pid, tile, elevation);
+    if (newCompanion != NULL && oldCompanion != NULL) {
+        critter_restore_body_effects(newCompanion, &effects);
+    }
 
     if (newCompanion != NULL) {
         for (int i = 0; i < savedCount; i++) {
@@ -2769,6 +2779,18 @@ static void coopnet_host_apply_combat_move(int targetTile)
 // whatever it decides, not a single precise attack.
 // Tells the client why the companion's attack didn't happen, in the game's own
 // words (the same messages combat_attack_this() shows a normal player). The
+// Host: a line for the client's message box (what the host's own player would have been told).
+void coopnet_host_tell_client(const char* text)
+{
+    if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected || text == NULL) {
+        return;
+    }
+    CoopCombatText msg;
+    memset(&msg, 0, sizeof(msg));
+    snprintf(msg.text, sizeof(msg.text), "%s", text);
+    coopnet_send_message(g_coopPeerSocket, COOP_MSG_COMBAT_TEXT, &msg, sizeof(msg));
+}
+
 // host used to refuse silently -- the client clicked, nothing happened, and its
 // action points sat unchanged with no hint that the shot needs more of them.
 static void coopnet_host_explain_refused_attack(int badShot, int hitMode, bool aiming)
@@ -4004,10 +4026,13 @@ static void coopnet_remote_client_tick()
     mouse_get_position(&mx, &my);
     Uint32 sdlButtons = SDL_GetMouseState(NULL, NULL);
     int buttons = ((sdlButtons & SDL_BUTTON_LMASK) != 0 ? 1 : 0) | ((sdlButtons & SDL_BUTTON_RMASK) != 0 ? 2 : 0);
+    // The self-test presses buttons and keys inside the engine, which the hardware state above never
+    // shows: without these, a test could not drive a host screen (barter, loot, the world map).
+    buttons |= autotest_mouse_buttons();
 
     const Uint8* keys = SDL_GetKeyboardState(NULL);
     for (int i = 4; i < kCoopRemoteMaxScancode; i++) {
-        bool down = keys[i] != 0;
+        bool down = keys[i] != 0 || autotest_key_held(i);
         if (down != g_coopRemoteKeyDown[i]) {
             g_coopRemoteKeyDown[i] = down;
             CoopRemoteInput in;
@@ -4776,6 +4801,11 @@ static bool coopnet_host_companion_is_current()
 {
     return g_coopHostMapLoadDepth == 0 && !world_map_screen_open() && map_data.name[0] != '\0'
         && strncmp(g_coopHostLastMapName, map_data.name, sizeof(g_coopHostLastMapName)) == 0;
+}
+
+bool coopnet_companion_is_current()
+{
+    return g_coopRole == CoopRole::Host && g_coopCompanion != NULL && coopnet_host_companion_is_current();
 }
 
 static void coopnet_host_send_scenery_list();
@@ -5900,6 +5930,10 @@ static void coopnet_host_apply_client_character(const CoopCharacter& c, bool ann
         data->skills[skill] = skill_points_for_level(g_coopCompanion, skill, c.skills[skill]);
     }
     g_coopCharSig = coopnet_companion_proto_signature(data);
+    if (g_coopRole == CoopRole::Host) {
+        // The stats were just rebuilt from the character: put the radiation sickness in effect back.
+        critter_reapply_rad_penalty(g_coopCompanion);
+    }
 
     int newMax = stat_level(g_coopCompanion, STAT_MAXIMUM_HIT_POINTS);
     int hp = g_coopCompanion->data.critter.hp;
@@ -5929,12 +5963,26 @@ static void coopnet_host_apply_client_character(const CoopCharacter& c, bool ann
 // Both roles: puts the client's character back on the companion after a map load rebuilt its prototype.
 static void coopnet_keep_companion_character()
 {
-    if (!g_coopCharKnown || g_coopCompanion == NULL || g_coopCompanion->pid != kCoopCompanionPid) {
+    if (g_coopCompanion == NULL || g_coopCompanion->pid != kCoopCompanionPid) {
+        return;
+    }
+    if (g_coopRole == CoopRole::Host ? !coopnet_host_companion_is_current() : g_coopClientMapLoading) {
         return;
     }
 
     Proto* proto = NULL;
     if (proto_ptr(kCoopCompanionPid, &proto) != 0 || proto == NULL) {
+        // The prototype was thrown away with the others after the companion was spawned: the
+        // character was left with every stat at 0 (no hit points, no action points) until the
+        // next map change -- found by the rads_carry autotest. Make it again.
+        proto = coopnet_ensure_companion_proto();
+        if (proto == NULL) {
+            return;
+        }
+        g_coopCharSig = 0;
+        debug_printf("\nCoop: the companion's character data was missing after a map load -- rebuilt\n");
+    }
+    if (!g_coopCharKnown) {
         return;
     }
     if (g_coopCharSig != 0 && coopnet_companion_proto_signature(&(proto->critter.data)) == g_coopCharSig) {
@@ -6130,6 +6178,8 @@ static void coopnet_poll_host()
 
                 coopnet_status(COOP_STATUS_GOOD, "Your friend connected!");
                 coopnet_stage("host: friend connected, sending the map");
+                // Joined in the middle of a fight: tell it so once its map has loaded.
+                g_coopHostCombatResendAtMs = coopnet_now_ms() + 4000;
             }
         }
     }
@@ -6247,6 +6297,13 @@ static void coopnet_poll_host()
             } else if (type == COOP_MSG_REMOTE_INPUT && payloadLen == sizeof(CoopRemoteInput)) {
                 CoopRemoteInput remoteIn;
                 memcpy(&remoteIn, payload, sizeof(remoteIn));
+                static int lastLoggedButtons = 0;
+                if (remoteIn.buttons != lastLoggedButtons || remoteIn.scancode >= 0) {
+                    lastLoggedButtons = remoteIn.buttons;
+                    debug_printf("\nCoop-remote: friend input at %d,%d buttons %d key %d down %d (screen active %d, view only %d)\n",
+                        remoteIn.x, remoteIn.y, remoteIn.buttons, remoteIn.scancode, remoteIn.down,
+                        g_coopRemoteHostActive ? 1 : 0, g_coopRemoteViewOnly ? 1 : 0);
+                }
                 coopnet_remote_host_apply_input(remoteIn);
             } else if (type == COOP_MSG_DIALOGUE_PICK && payloadLen == sizeof(int32_t)) {
                 if (g_coopDialogueDrivenByClient) {
@@ -6370,6 +6427,16 @@ static void coopnet_poll_host()
             coopnet_host_broadcast_combat_participants();
             coopnet_host_broadcast_world();
             coopnet_host_send_state_check();
+            if (g_coopHostCombatResendAtMs != 0 && now >= g_coopHostCombatResendAtMs) {
+                g_coopHostCombatResendAtMs = 0;
+                if (isInCombat() && g_coopCompanion != NULL) {
+                    coopnet_send_message(g_coopPeerSocket, COOP_MSG_COMBAT_BEGIN, NULL, 0);
+                    CoopCombatTurn turn;
+                    turn.actionPoints = g_coopHostCombatTurnActive ? g_coopCompanion->data.critter.combat.ap : 0;
+                    coopnet_send_message(g_coopPeerSocket, COOP_MSG_COMBAT_TURN, &turn, sizeof(turn));
+                    debug_printf("\nCoop: the friend joined during a fight -- sent the fight (turnActive=%d ap=%d)\n", g_coopHostCombatTurnActive ? 1 : 0, turn.actionPoints);
+                }
+            }
             coopnet_host_broadcast_settings();
             g_coopSendDroppable = wasDroppable;
             // Changes are only sent once, so these may wait for the peer.
@@ -8274,6 +8341,14 @@ static void coopnet_poll_client()
             } else if (type == COOP_MSG_COMBAT_TURN && payloadLen == sizeof(CoopCombatTurn)) {
                 CoopCombatTurn turn;
                 memcpy(&turn, payload, sizeof(turn));
+                if (turn.actionPoints > 0 && !g_coopClientInCombat) {
+                    // A fight this client never saw start: it (re)joined in the middle of it. Without
+                    // this it never acted and the host waited on the companion's turn forever
+                    // (found by the rejoin autotest).
+                    debug_printf("\nCoop: turn given in a fight this client missed the start of -- joining it\n");
+                    g_coopClientInCombat = true;
+                    coopnet_client_combat_turn_ui_begin();
+                }
                 g_coopClientCombatTurnActive = turn.actionPoints > 0;
                 g_coopClientCombatAP = turn.actionPoints;
                 // Keeps the companion's own object field consistent with
@@ -8346,6 +8421,7 @@ static void coopnet_poll_client()
             } else if (type == COOP_MSG_DIALOGUE_BEGIN) {
                 char buffer[64];
                 strcpy(buffer, "The host has started a conversation.");
+                debug_printf("\nCoop: received DIALOGUE_BEGIN\n");
                 display_print(buffer);
             } else if (type == COOP_MSG_DIALOGUE_STATE && payloadLen == sizeof(CoopDialogueState)) {
                 CoopDialogueState state;
@@ -8461,6 +8537,7 @@ static void coopnet_poll_client()
             } else if (type == COOP_MSG_WORLDMAP_BEGIN) {
                 char buffer[64];
                 strcpy(buffer, "The host is now traveling the wasteland.");
+                debug_printf("\nCoop: received WORLDMAP_BEGIN\n");
                 display_print(buffer);
             } else if (type == COOP_MSG_WORLDMAP_STATE && payloadLen == sizeof(CoopWorldmapState)) {
                 CoopWorldmapState state;
@@ -9142,6 +9219,22 @@ void coopnet_on_client_attack(Object* target)
         bool aiming;
         if (intface_get_attack(&hitMode, &aiming) != -1) {
             action.hitMode = hitMode;
+            // Too few action points left: say so at once, like the normal game does, instead of
+            // asking the host, which would only refuse it.
+            if (g_coopCompanion != NULL && coopnet_is_companion_turn_active()) {
+                int cost = item_w_mp_cost(g_coopCompanion, hitMode, aiming);
+                if (cost > g_coopClientCombatAP) {
+                    MessageListItem item;
+                    item.num = 100; // "You need %d action points."
+                    if (message_search(&combat_message_file, &item)) {
+                        char text[160];
+                        snprintf(text, sizeof(text), item.text, cost);
+                        display_print(text);
+                    }
+                    debug_printf("\nCoop: attack not sent, %d action points needed and %d left\n", cost, g_coopClientCombatAP);
+                    return;
+                }
+            }
             if (aiming && FID_TYPE(target->fid) == OBJ_TYPE_CRITTER) {
                 int location;
                 if (combat_pick_called_shot(target, hitMode, &location) == -1) {
@@ -9317,7 +9410,7 @@ static bool coopnet_host_run_companion_screen(Object* looter, Object* container,
 // ---------------------------------------------------------------------------
 
 const int32_t kCoopProfileMagic = 0x504F4F43; // "COOP"
-const int32_t kCoopProfileVersion = 2;
+const int32_t kCoopProfileVersion = 3; // 3: + the friend's radiation and poison (2 still loads)
 
 struct CoopProfileFile {
     int32_t magic;
@@ -9326,6 +9419,7 @@ struct CoopProfileFile {
     int32_t hp;
     CoopInventorySync sync;
     CoopCharBlob character; // this world's record of the client's character (blobLen 0 = none)
+    CritterBodyEffects effects; // version 3: radiation, poison and their timers
 };
 
 static bool g_coopHostProfileValid = false;
@@ -9438,6 +9532,7 @@ void coopnet_host_save_profile(const char* path)
     if (g_coopRole == CoopRole::Host && g_coopCompanion != NULL) {
         file.valid = 1;
         file.hp = g_coopCompanion->data.critter.hp;
+        critter_capture_body_effects(g_coopCompanion, &file.effects);
         coopnet_build_inventory_snapshot(g_coopCompanion, file.sync);
     }
 
@@ -9476,11 +9571,19 @@ static bool coopnet_host_read_profile(const char* path)
         return false;
     }
     CoopProfileFile file;
-    size_t got = db_fread(&file, sizeof(file), 1, stream);
+    memset(&file, 0, sizeof(file));
+    size_t got = db_fread(&file, 1, sizeof(file), stream);
     db_fclose(stream);
 
-    if (got != 1 || file.magic != kCoopProfileMagic || file.version != kCoopProfileVersion || file.valid == 0) {
+    // Version 2 files end before the effects: they load with none.
+    size_t needed = file.version == 2 ? offsetof(CoopProfileFile, effects) : sizeof(file);
+    if (got < needed || file.magic != kCoopProfileMagic || (file.version != 2 && file.version != kCoopProfileVersion) || file.valid == 0) {
         return false;
+    }
+    if (file.version == 2) {
+        memset(&file.effects, 0, sizeof(file.effects));
+        file.effects.poisonDelay = -1;
+        file.effects.radDelay = -1;
     }
     g_coopHostProfile = file;
     g_coopHostProfileValid = true;
@@ -9535,6 +9638,8 @@ static void coopnet_host_apply_saved_profile()
     if (g_coopHostProfile.hp > 0) {
         g_coopCompanion->data.critter.hp = g_coopHostProfile.hp;
     }
+    critter_restore_body_effects(g_coopCompanion, &g_coopHostProfile.effects);
+    critter_reapply_rad_penalty(g_coopCompanion);
     coopnet_refresh_critter_fid(g_coopCompanion);
     debug_printf("\nCoop: applied saved client profile (hp=%d items=%d)\n", g_coopHostProfile.hp, g_coopHostProfile.sync.itemCount);
 }
@@ -10078,7 +10183,10 @@ static void coopnet_host_apply_dialogue_start(const CoopItemEvent& evt)
     // conversation starts -- the driver flag is raised on arrival, see
     // coopnet_note_companion_reached_npc(). Clears any move the client had going.
     g_coopLastCommandedTile[0] = -1;
-    if (action_talk_to(g_coopCompanion, target) == -1) {
+    int talkRc = action_talk_to(g_coopCompanion, target);
+    debug_printf("\nCoop: friend walks to talk to pid %d: %d tiles, anim busy %d, request rc %d\n",
+        evt.pid, obj_dist(g_coopCompanion, target), anim_busy(g_coopCompanion) ? 1 : 0, talkRc);
+    if (talkRc == -1) {
         coopnet_report_glitch("companion could not start walking to talk to pid=%d\n", evt.pid);
     }
 }
@@ -10157,6 +10265,7 @@ int coopnet_dialogue_filter_input(int keyCode)
         // barter / "tell me about" buttons.
         int command = g_coopPendingDialoguePick;
         g_coopPendingDialoguePick = -1;
+        debug_printf("\nCoop-barter: the friend pressed %s in the conversation\n", command == -2 ? "Barter" : "Tell me about");
         return command == -2 ? KEY_LOWERCASE_B : KEY_LOWERCASE_A;
     }
 
