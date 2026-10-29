@@ -453,7 +453,7 @@ void handle_inventory()
 
             obj_dude->data.critter.combat.ap -= actionPointsRequired;
             intface_update_move_points(obj_dude->data.critter.combat.ap, combat_free_move);
-        } else if (coopnet_get_role() == CoopRole::Client && inven_dude == coopnet_get_companion()) {
+        } else if (coopnet_get_role() == CoopRole::Client && coopnet_is_companion(inven_dude)) {
             // Same vanilla formula as obj_dude's own case just above --
             // inven_dude's own combat.ap field is kept in sync with the
             // real, host-authoritative value via the normal turn-AP
@@ -581,7 +581,7 @@ void handle_inventory()
         }
     }
 
-    bool clientCompanionInventory = coopnet_get_role() == CoopRole::Client && inven_dude != NULL && inven_dude == coopnet_get_companion();
+    bool clientCompanionInventory = coopnet_get_role() == CoopRole::Client && inven_dude != NULL && coopnet_is_companion(inven_dude);
 
     exit_inventory(isoWasEnabled);
 

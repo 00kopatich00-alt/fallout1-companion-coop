@@ -1048,7 +1048,7 @@ void gmouse_handle_event(int mouseX, int mouseY, int mouseState)
             }
             if (coopnet_get_role() == CoopRole::Client) {
                 debug_printf("\nCoop: client crosshair click target=%p (isHostDude=%d isCompanion=%d pid=%d) turnActive=%d syncedCombat=%d\n",
-                    (void*)target, target == obj_dude, target == coopnet_get_companion(), target != NULL ? target->pid : -1,
+                    (void*)target, target == obj_dude, coopnet_is_companion(target), target != NULL ? target->pid : -1,
                     coopnet_is_companion_turn_active(), coopnet_is_client_in_synced_combat());
             }
             if (target != NULL) {
@@ -1080,16 +1080,16 @@ void gmouse_handle_event(int mouseX, int mouseY, int mouseState)
                     // explicit user request, and is handled correctly now via
                     // kCoopCombatTargetHostDude (coopnet.cc) instead of ever
                     // reaching this ambiguous auto-target path.
-                    if (coopnet_is_companion_turn_active() && target != coopnet_get_companion()) {
+                    if (coopnet_is_companion_turn_active() && !coopnet_is_companion(target)) {
                         coopnet_on_client_attack(target);
-                    } else if (!coopnet_is_client_in_synced_combat() && target != coopnet_get_companion() && target != obj_dude) {
+                    } else if (!coopnet_is_client_in_synced_combat() && !coopnet_is_companion(target) && target != obj_dude) {
                         // No fight yet: clicking an enemy asks the host to
                         // start one against it -- see
                         // coopnet_host_apply_combat_start().
                         coopnet_on_client_start_combat(target);
                     } else if (coopnet_get_role() == CoopRole::Client) {
                         debug_printf("\nCoop: crosshair click on pid=%d did nothing (turnActive=%d syncedCombat=%d isCompanion=%d isHostDude=%d)\n",
-                            target->pid, coopnet_is_companion_turn_active(), coopnet_is_client_in_synced_combat(), target == coopnet_get_companion(), target == obj_dude);
+                            target->pid, coopnet_is_companion_turn_active(), coopnet_is_client_in_synced_combat(), coopnet_is_companion(target), target == obj_dude);
                     }
                 } else {
                     combat_attack_this(target);

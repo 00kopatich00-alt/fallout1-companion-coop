@@ -1132,7 +1132,7 @@ static int map_age_dead_critters()
             && obj != obj_dude
             // Coop: the client's character (the companion) has no prototype at this
             // point -- the map change just freed every one -- so it must not be aged.
-            && obj != coopnet_get_companion()
+            && !coopnet_is_companion(obj)
             && !isPartyMember(obj)
             && !critter_is_dead(obj)) {
             obj->data.critter.combat.maneuver &= ~CRITTER_MANUEVER_FLEEING;
@@ -1160,7 +1160,7 @@ static int map_age_dead_critters()
     while (obj != NULL) {
         int type = PID_TYPE(obj->pid);
         if (type == OBJ_TYPE_CRITTER) {
-            if (obj != obj_dude && obj != coopnet_get_companion() && critter_is_dead(obj)) {
+            if (obj != obj_dude && !coopnet_is_companion(obj) && critter_is_dead(obj)) {
                 if (critter_kill_count_type(obj) != KILL_TYPE_ROBOT) {
                     objects[count++] = obj;
 

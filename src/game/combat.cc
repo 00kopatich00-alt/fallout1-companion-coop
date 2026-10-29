@@ -2285,7 +2285,7 @@ static int combat_turn(Object* a1, bool a2)
             intface_update_move_points(obj_dude->data.critter.combat.ap, combat_free_move);
         } else {
             // Coop: the client's character gets its Bonus Move free move points too.
-            if (a1 == coopnet_get_companion() && perk_is_player(a1)) {
+            if (coopnet_is_companion(a1) && perk_is_player(a1)) {
                 combat_free_move = 2 * perk_level_of(a1, PERK_BONUS_MOVE);
             }
             soundUpdate();
@@ -2357,7 +2357,7 @@ static int combat_turn(Object* a1, bool a2)
                 // calling into the host-only network loop (see
                 // coopnet_combat_input()'s own guard for why that would be
                 // unsafe to run on the client).
-                if (a1 == coopnet_get_companion() && coopnet_get_role() == CoopRole::Host && coopnet_is_connected()) {
+                if (coopnet_get_role() == CoopRole::Host && coopnet_companion_is_played(a1)) {
                     coopnet_combat_input(a1);
                 } else {
                     combat_ai(a1, gcsd != NULL ? gcsd->defender : NULL);
@@ -2467,9 +2467,9 @@ void combat(STRUCT_664980* attack)
     // companion-only threat ever reaches this function at all.
     if (attack != NULL) {
         debug_printf("\nCoop-debug: combat() called, attacker=%s(pid=%d) defender=%s(pid=%d)\n",
-            attack->attacker == obj_dude ? "obj_dude" : (attack->attacker == coopnet_get_companion() ? "companion" : "other"),
+            attack->attacker == obj_dude ? "obj_dude" : (coopnet_is_companion(attack->attacker) ? "companion" : "other"),
             attack->attacker != NULL ? attack->attacker->pid : -1,
-            attack->defender == obj_dude ? "obj_dude" : (attack->defender == coopnet_get_companion() ? "companion" : "other"),
+            attack->defender == obj_dude ? "obj_dude" : (coopnet_is_companion(attack->defender) ? "companion" : "other"),
             attack->defender != NULL ? attack->defender->pid : -1);
     } else {
         debug_printf("\nCoop-debug: combat() called with attack=NULL\n");
@@ -2642,7 +2642,7 @@ int combat_attack(Object* attacker, Object* defender, int hitMode, int hitLocati
 
     // Coop: what each of the friend's attacks came to, with the perks and traits it has -- so a test
     // fight shows whether they work for the friend's character (hits, damage, criticals, AP cost).
-    if (coopnet_get_role() == CoopRole::Host && attacker == coopnet_get_companion()) {
+    if (coopnet_get_role() == CoopRole::Host && coopnet_is_companion(attacker)) {
         char owned[200] = "";
         size_t used = 0;
         for (int perk = 0; perk < PERK_COUNT && used < sizeof(owned) - 12; perk++) {
@@ -2921,7 +2921,7 @@ static int compute_attack(Attack* attack)
 
     anim = item_w_anim(attack->attacker, attack->hitMode);
     to_hit = determine_to_hit(attack->attacker, attack->defender, attack->defenderHitLocation, attack->hitMode);
-    if (coopnet_get_role() == CoopRole::Host && attack->attacker == coopnet_get_companion()) {
+    if (coopnet_get_role() == CoopRole::Host && coopnet_is_companion(attack->attacker)) {
         debug_printf("\nCoop-hit: host rolls %d%% for the friend's character (location %d, mode %d)\n", to_hit, attack->defenderHitLocation, attack->hitMode);
         char why[200];
         combat_describe_to_hit(attack->attacker, attack->defender, attack->hitMode, why, sizeof(why));
@@ -4808,19 +4808,32 @@ void combat_outline_on()
     // fire target per an explicit user request (object_under_mouse()'s
     // call sites in gmouse.cc were fixed the same way, to actually let it
     // be clicked at all). Left excluded on the host.
-    Object* coopCompanion = coopnet_get_companion();
     bool excludeHostDude = coopnet_get_role() != CoopRole::Client;
+
+    // Coop: what got the enemy outline, for the log (friends must never be in it).
+    int coopOutlined = 0;
+    int coopFriends = 0;
 
     if (isInCombat()) {
         for (index = 0; index < list_total; index++) {
-            if ((combat_list[index] != obj_dude || !excludeHostDude) && combat_list[index] != coopCompanion && (combat_list[index]->data.critter.combat.results & DAM_DEAD) == 0) {
+            if (coopnet_is_friend_character(combat_list[index])) {
+                coopFriends++;
+                debug_printf("\nCoop-outline: no enemy outline on %s\n", critter_name(combat_list[index]));
+            }
+            if ((combat_list[index] != obj_dude || !excludeHostDude) && !coopnet_is_friend_character(combat_list[index]) && (combat_list[index]->data.critter.combat.results & DAM_DEAD) == 0) {
                 obj_turn_on_outline(combat_list[index], NULL);
+                coopOutlined++;
             }
         }
     } else {
         critters_length = obj_create_list(-1, map_elevation, OBJ_TYPE_CRITTER, &critters);
         for (index = 0; index < critters_length; index++) {
-            if ((critters[index] != obj_dude || !excludeHostDude) && critters[index] != coopCompanion && (critters[index]->data.critter.combat.results & DAM_DEAD) == 0) {
+            if (coopnet_is_friend_character(critters[index])) {
+                coopFriends++;
+                debug_printf("\nCoop-outline: no enemy outline on %s\n", critter_name(critters[index]));
+            }
+            if ((critters[index] != obj_dude || !excludeHostDude) && !coopnet_is_friend_character(critters[index]) && (critters[index]->data.critter.combat.results & DAM_DEAD) == 0) {
+                coopOutlined++;
                 outline_type = OUTLINE_TYPE_HOSTILE;
                 if (perk_level_any(PERK_FRIENDLY_FOE)) {
                     if (critters[index]->data.critter.combat.team == obj_dude->data.critter.combat.team) {
@@ -4836,6 +4849,10 @@ void combat_outline_on()
         if (critters_length != 0) {
             obj_delete_list(critters);
         }
+    }
+
+    if (coopnet_get_role() != CoopRole::None) {
+        debug_printf("\nCoop-outline: %d outlined as enemies, %d friends left without one\n", coopOutlined, coopFriends);
     }
 
     tile_refresh_display();

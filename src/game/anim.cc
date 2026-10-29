@@ -1804,7 +1804,7 @@ static bool anim_can_use_door(Object* critter, Object* door)
     // scr_chk_spatials_in()) stays alongside this, unrelated -- that one
     // refuses the companion the door/trigger entirely, everywhere else this
     // just requires the same explicit click obj_dude itself needs.
-    if (critter == obj_dude || critter == coopnet_get_companion()) {
+    if (critter == obj_dude || coopnet_is_companion(critter)) {
         return false;
     }
 

@@ -183,6 +183,11 @@ enum CoopMsgType : uint8_t {
     COOP_MSG_REMOTE_TILEZ = 69, // host -> client, a compressed 32x32 block
     COOP_MSG_REMOTE_PAUSE = 70, // host -> client, a cutscene is playing: stop showing the screen (1) / the screen is back (0)
     COOP_MSG_OBJ_ANIM = 66, // host -> client, a one-off animation of a mirrored character (ladder climb) -- see CoopObjAnim
+    COOP_MSG_FRIEND_NAMES = 79, // host -> client, every seat's character name (the other friends' characters are shown by name) -- see CoopFriendNames
+};
+
+struct CoopFriendNames {
+    char names[COOP_MAX_FRIENDS][32]; // per seat, empty = nobody
 };
 
 // Experience the host's party earned (kills and quests alike). Each player keeps
@@ -264,7 +269,7 @@ struct CoopSettings {
 // Bumped whenever behavior changes in a way an older exe on the other side
 // would misread -- a mismatch is now refused with a clear message (see the
 // HELLO handling) instead of producing confusing half-working sessions.
-const uint32_t kCoopProtocolVersion = 15;
+const uint32_t kCoopProtocolVersion = 16; // 16: up to three friends (other friends' characters arrive as mirrors)
 
 // The first two fields are the original HELLO and stay in front, so even an older client's
 // shorter HELLO can still be read far enough to refuse it with a clear message.
@@ -281,6 +286,8 @@ struct CoopHello {
     // run different scripts; the host logs both and warns instead of leaving a mystery.
     uint32_t dataHash;
     char dataText[120];
+    // Who is joining: a friend coming back gets the seat (and character) kept for it.
+    char characterName[32];
 };
 
 struct CoopHelloAck {
@@ -952,6 +959,15 @@ enum class CoopConnState {
     Connected,
 };
 
+// Host: one slot per joined friend (up to three). Everything the host keeps about a
+// friend -- its connection, companion, what it has been sent -- has one copy per
+// slot, and the names below refer to the slot being handled (g_coopPeerIdx). A
+// client only ever uses slot 0.
+const int kCoopMaxPeers = COOP_MAX_FRIENDS; // COOP_PER_PEER below lists one value per seat: keep the two in step
+// The initial value of a per-friend table: `x` once per seat (kCoopMaxPeers of them).
+#define COOP_PER_PEER(...) { __VA_ARGS__, __VA_ARGS__, __VA_ARGS__, __VA_ARGS__, __VA_ARGS__, __VA_ARGS__, __VA_ARGS__ }
+static int g_coopPeerIdx = 0;
+
 static bool g_coopAllowMultipleInstances = false;
 static bool g_coopSocketsInitialized = false;
 static char g_coopInstanceLabel[64] = "";
@@ -959,12 +975,85 @@ static char g_coopConnectTarget[64] = "127.0.0.1";
 static bool g_coopConnectTargetGiven = false;
 
 static CoopRole g_coopRole = CoopRole::None;
-static CoopConnState g_coopConnState = CoopConnState::Idle;
+static CoopConnState g_coopConnState_[kCoopMaxPeers] = COOP_PER_PEER(CoopConnState::Idle);
+#define g_coopConnState g_coopConnState_[g_coopPeerIdx]
 
 static CoopSocket g_coopListenSocket = COOP_INVALID_SOCKET;
-static CoopSocket g_coopPeerSocket = COOP_INVALID_SOCKET;
+static CoopSocket g_coopPeerSocket_[kCoopMaxPeers] = COOP_PER_PEER(COOP_INVALID_SOCKET);
+#define g_coopPeerSocket g_coopPeerSocket_[g_coopPeerIdx]
 
-static Object* g_coopCompanion = NULL;
+static Object* g_coopCompanion_[kCoopMaxPeers] = COOP_PER_PEER(NULL);
+#define g_coopCompanion g_coopCompanion_[g_coopPeerIdx]
+
+// At the very top of a host entry point: runs the rest of the function once
+// for every friend's slot (g_coopPeerIdx set to it) and returns. `call` is the
+// function calling itself with its own arguments. Anything it calls in turn
+// reaches every friend again, so a notification caused while one friend's
+// messages are handled still goes to all of them.
+static bool g_coopPeerReenter = false;
+#define COOP_EACH_PEER(call)                                                          \
+    if (g_coopRole == CoopRole::Host && !g_coopPeerReenter) {                         \
+        int coopSavedPeerIdx = g_coopPeerIdx;                                         \
+        for (int coopSlot = 0; coopSlot < kCoopMaxPeers; coopSlot++) {                \
+            if (g_coopConnState_[coopSlot] == CoopConnState::Idle) {                  \
+                continue;                                                             \
+            }                                                                         \
+            g_coopPeerIdx = coopSlot;                                                 \
+            g_coopPeerReenter = true;                                                 \
+            call;                                                                     \
+        }                                                                             \
+        g_coopPeerIdx = coopSavedPeerIdx;                                             \
+        return;                                                                       \
+    }                                                                                 \
+    g_coopPeerReenter = false;
+
+// The slot whose companion `obj` is, or -1. A client only has its own (slot 0).
+static int coopnet_slot_of_companion(Object* obj)
+{
+    if (obj == NULL) {
+        return -1;
+    }
+    int slots = g_coopRole == CoopRole::Host ? kCoopMaxPeers : 1;
+    for (int slot = 0; slot < slots; slot++) {
+        if (g_coopCompanion_[slot] == obj) {
+            return slot;
+        }
+    }
+    return -1;
+}
+
+bool coopnet_is_companion(Object* obj)
+{
+    return coopnet_slot_of_companion(obj) != -1;
+}
+
+bool coopnet_companion_is_played(Object* obj)
+{
+    int slot = coopnet_slot_of_companion(obj);
+    return slot != -1 && g_coopConnState_[slot] == CoopConnState::Connected;
+}
+
+// Makes `obj`'s slot the one being handled, if it is a friend's companion.
+// Returns false (and changes nothing) otherwise.
+static bool coopnet_select_slot_of(Object* obj)
+{
+    int slot = coopnet_slot_of_companion(obj);
+    if (slot == -1) {
+        return false;
+    }
+    g_coopPeerIdx = slot;
+    return true;
+}
+
+// Restores the slot being handled when it goes out of scope.
+struct CoopSlotScope {
+    int saved;
+    CoopSlotScope()
+        : saved(g_coopPeerIdx)
+    {
+    }
+    ~CoopSlotScope() { g_coopPeerIdx = saved; }
+};
 
 // Client-side only: true while it's the companion's combat turn, per the
 // most recent COOP_MSG_COMBAT_TURN received. Gates gmouse.cc's click
@@ -1035,12 +1124,15 @@ static int g_coopParticipantCount = 0;
 // running, i.e. genuinely the companion's turn. Gates applying an incoming
 // COOP_MSG_COMBAT_ACTION -- without this, a message that arrives late (after
 // the turn already moved on) could move the companion out of turn order.
-static bool g_coopHostCombatTurnActive = false;
-static uint32_t g_coopHostCombatResendAtMs = 0; // a friend joined: send it the fight in progress at this time
+static bool g_coopHostCombatTurnActive_[kCoopMaxPeers] = COOP_PER_PEER(false);
+#define g_coopHostCombatTurnActive g_coopHostCombatTurnActive_[g_coopPeerIdx]
+static uint32_t g_coopHostCombatResendAtMs_[kCoopMaxPeers] = COOP_PER_PEER(0); // a friend joined: send it the fight in progress at this time
+#define g_coopHostCombatResendAtMs g_coopHostCombatResendAtMs_[g_coopPeerIdx]
 
 // Host-side only: set by an incoming COOP_MSG_COMBAT_ACTION with actionType
 // == COOP_COMBAT_ACTION_END_TURN, read and cleared by coopnet_combat_input().
-static bool g_coopHostCombatEndTurnRequested = false;
+static bool g_coopHostCombatEndTurnRequested_[kCoopMaxPeers] = COOP_PER_PEER(false);
+#define g_coopHostCombatEndTurnRequested g_coopHostCombatEndTurnRequested_[g_coopPeerIdx]
 
 // Host-side only: true for the narrow window around a single
 // combat_display() call (combat.cc) that's relevant to the companion --
@@ -1068,7 +1160,8 @@ static bool g_coopCapturingCombatText = false;
 // (matching vanilla's own interrupt-on-click behavior) rather than waiting
 // for arrival. Client side uses index 0/1 for companion/dude per received
 // CoopPosition.which. -1 = nothing commanded yet.
-static int g_coopLastCommandedTile[2] = { -1, -1 };
+static int g_coopLastCommandedTile_[kCoopMaxPeers][2] = COOP_PER_PEER({ -1, -1 });
+#define g_coopLastCommandedTile g_coopLastCommandedTile_[g_coopPeerIdx]
 
 static void coopnet_host_apply_dialogue_start(const CoopItemEvent& evt);
 struct CoopFloatText;
@@ -1080,8 +1173,10 @@ static void coopnet_client_apply_float_text(const CoopFloatText& f);
 // leaves the object alone instead of chasing each position snapshot with a
 // fresh short run (the stop-start "limp"). Times out so a path that never
 // completes (blocked, interrupted) can't suppress correction forever.
-static int g_coopMoveDest[2] = { -1, -1 };
-static uint32_t g_coopMoveDestStartMs[2] = { 0, 0 };
+static int g_coopMoveDest_[kCoopMaxPeers][2] = COOP_PER_PEER({ -1, -1 });
+#define g_coopMoveDest g_coopMoveDest_[g_coopPeerIdx]
+static uint32_t g_coopMoveDestStartMs_[kCoopMaxPeers][2] = COOP_PER_PEER({ 0, 0 });
+#define g_coopMoveDestStartMs g_coopMoveDestStartMs_[g_coopPeerIdx]
 const uint32_t kCoopMoveDestTimeoutMs = 4000;
 
 // How far a candidate local critter may be from a newly-reported
@@ -1095,7 +1190,8 @@ const int kCoopParticipantAdoptDistance = 20;
 static int g_coopSanctionedMoveDepth = 0;
 
 // Host side: when the client last ordered the companion to walk somewhere.
-static uint32_t g_coopHostLastMoveIntentMs = 0;
+static uint32_t g_coopHostLastMoveIntentMs_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopHostLastMoveIntentMs g_coopHostLastMoveIntentMs_[g_coopPeerIdx]
 
 // Client side: true while a host-ordered map load is in progress and
 // g_coopCompanion is in a half torn-down state (kept alive by OBJECT_NO_REMOVE
@@ -1140,10 +1236,14 @@ static void coopnet_client_heap_check(const char* where)
 // drive" fact is held as pending until gdialog_enter() really begins one --
 // and expires, so a request the engine refused (NPC can't talk, etc.) can't
 // leave the next, host-started conversation wrongly treated as client-driven.
-static bool g_coopDialogueDriverPending = false;
-static uint32_t g_coopDialogueDriverPendingMs = 0;
-static bool g_coopDialogueDrivenByClient = false;
-static int g_coopPendingDialoguePick = -1;
+static bool g_coopDialogueDriverPending_[kCoopMaxPeers] = COOP_PER_PEER(false);
+#define g_coopDialogueDriverPending g_coopDialogueDriverPending_[g_coopPeerIdx]
+static uint32_t g_coopDialogueDriverPendingMs_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopDialogueDriverPendingMs g_coopDialogueDriverPendingMs_[g_coopPeerIdx]
+static bool g_coopDialogueDrivenByClient_[kCoopMaxPeers] = COOP_PER_PEER(false);
+#define g_coopDialogueDrivenByClient g_coopDialogueDrivenByClient_[g_coopPeerIdx]
+static int g_coopPendingDialoguePick_[kCoopMaxPeers] = COOP_PER_PEER(-1);
+#define g_coopPendingDialoguePick g_coopPendingDialoguePick_[g_coopPeerIdx]
 const uint32_t kCoopDialogueDriverPendingTimeoutMs = 4000;
 
 // Host-side: set the instant the host's own Talk click starts a conversation
@@ -1168,19 +1268,26 @@ static bool g_coopDialogueHostInitiated = false;
 // Client side: the host says this conversation is ours to drive.
 static bool g_coopClientDrivesDialogue = false;
 
-static unsigned char g_coopRecvBuffer[4096];
-static int g_coopRecvBufferLen = 0;
+static unsigned char g_coopRecvBuffer_[kCoopMaxPeers][4096];
+#define g_coopRecvBuffer g_coopRecvBuffer_[g_coopPeerIdx]
+static int g_coopRecvBufferLen_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopRecvBufferLen g_coopRecvBufferLen_[g_coopPeerIdx]
 
-static uint32_t g_coopLastRecvTimeMs = 0;
-static uint32_t g_coopLastBroadcastTimeMs = 0;
-static uint32_t g_coopLastFollowCheckTimeMs = 0;
-static uint32_t g_coopLastHeartbeatSentTimeMs = 0;
+static uint32_t g_coopLastRecvTimeMs_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopLastRecvTimeMs g_coopLastRecvTimeMs_[g_coopPeerIdx]
+static uint32_t g_coopLastBroadcastTimeMs_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopLastBroadcastTimeMs g_coopLastBroadcastTimeMs_[g_coopPeerIdx]
+static uint32_t g_coopLastFollowCheckTimeMs_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopLastFollowCheckTimeMs g_coopLastFollowCheckTimeMs_[g_coopPeerIdx]
+static uint32_t g_coopLastHeartbeatSentTimeMs_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopLastHeartbeatSentTimeMs g_coopLastHeartbeatSentTimeMs_[g_coopPeerIdx]
 
 // Host-side only: map_data.name as of the last coopnet_poll_host() tick.
 // Compared each tick to detect a completed map transition (see
 // coopnet_host_check_map_transition()). Set directly in coopnet_start_host()
 // so starting to host mid-map is never mistaken for a transition.
-static char g_coopHostLastMapName[16] = "";
+static char g_coopHostLastMapName_[kCoopMaxPeers][16] = COOP_PER_PEER("");
+#define g_coopHostLastMapName g_coopHostLastMapName_[g_coopPeerIdx]
 
 // Host-side only: obj_dude->elevation as of the last check. A door/stairs
 // leading into a small building is often modeled as an elevation change
@@ -1192,17 +1299,20 @@ static char g_coopHostLastMapName[16] = "";
 // comment for how this is now also checked. -1 so starting to host
 // mid-map is never mistaken for a transition, same reasoning as
 // g_coopHostLastMapName's own init.
-static int g_coopHostLastElevation = -1;
+static int g_coopHostLastElevation_[kCoopMaxPeers] = COOP_PER_PEER(-1);
+#define g_coopHostLastElevation g_coopHostLastElevation_[g_coopPeerIdx]
 // Set when the client asked for a full resync after loading one of its own
 // saves: the next map "change" is then only a re-send, not a real transition.
-static bool g_coopHostResyncOnly = false;
+static bool g_coopHostResyncOnly_[kCoopMaxPeers] = COOP_PER_PEER(false);
+#define g_coopHostResyncOnly g_coopHostResyncOnly_[g_coopPeerIdx]
 
 // Host-side only: whether COOP_GAME_OVER_COMPANION_DIED has already been
 // sent for the current companion, so coopnet_host_check_companion_death()
 // only ever fires once (main.cc's game_user_wants_to_quit check keeps
 // re-running every remaining tick before the loop actually exits). Reset in
 // coopnet_start_host() for the same reason g_coopHostLastMapName is.
-static bool g_coopCompanionGameOverSent = false;
+static bool g_coopCompanionGameOverSent_[kCoopMaxPeers] = COOP_PER_PEER(false);
+#define g_coopCompanionGameOverSent g_coopCompanionGameOverSent_[g_coopPeerIdx]
 
 // coopnet_send_message()'s retry budget when send() reports the socket
 // buffer is full (EWOULDBLOCK) -- confirmed via testing this is a real risk
@@ -1265,11 +1375,16 @@ struct CoopCompanionActionRequest {
 };
 
 const int kCoopActionQueueCapacity = 16;
-static CoopCompanionActionRequest g_coopActionQueue[kCoopActionQueueCapacity];
-static int g_coopActionQueueHead = 0;
-static int g_coopActionQueueLen = 0;
-static bool g_coopCompanionActionBusy = false;
-static uint32_t g_coopCompanionActionStartMs = 0;
+static CoopCompanionActionRequest g_coopActionQueue_[kCoopMaxPeers][kCoopActionQueueCapacity];
+#define g_coopActionQueue g_coopActionQueue_[g_coopPeerIdx]
+static int g_coopActionQueueHead_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopActionQueueHead g_coopActionQueueHead_[g_coopPeerIdx]
+static int g_coopActionQueueLen_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopActionQueueLen g_coopActionQueueLen_[g_coopPeerIdx]
+static bool g_coopCompanionActionBusy_[kCoopMaxPeers] = COOP_PER_PEER(false);
+#define g_coopCompanionActionBusy g_coopCompanionActionBusy_[g_coopPeerIdx]
+static uint32_t g_coopCompanionActionStartMs_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopCompanionActionStartMs g_coopCompanionActionStartMs_[g_coopPeerIdx]
 
 // Safety net only -- cleared normally as soon as the companion's action
 // actually succeeds (coopnet_notify_item_picked_up() for pickups; use
@@ -1705,7 +1820,8 @@ static int g_coopClientAttempts = 0;
 static int g_coopClientLastFailCode = 0;
 
 static int g_coopHostIncomingAttempts = 0;
-static uint32_t g_coopHostHelloStartMs = 0;
+static uint32_t g_coopHostHelloStartMs_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopHostHelloStartMs g_coopHostHelloStartMs_[g_coopPeerIdx]
 static uint32_t g_coopHostListenStartMs = 0;
 static bool g_coopHostNoAttemptWarned = false;
 
@@ -1762,16 +1878,23 @@ struct CoopNetStats {
     uint32_t sentByType[256];
     uint32_t recvByType[256];
 };
-static CoopNetStats g_coopNetStats;
-static uint32_t g_coopSendStallUntilMs = 0; // see coopnet_send_message(): the peer stopped reading
+static CoopNetStats g_coopNetStats_[kCoopMaxPeers];
+#define g_coopNetStats g_coopNetStats_[g_coopPeerIdx]
+static uint32_t g_coopSendStallUntilMs_[kCoopMaxPeers] = COOP_PER_PEER(0); // see coopnet_send_message(): the peer stopped reading
+#define g_coopSendStallUntilMs g_coopSendStallUntilMs_[g_coopPeerIdx]
 
 // Round-trip measurement: every second each side sends a PING with its clock, the
 // other answers with the same number, and the time that took is the "ping".
-static float g_coopRttMs = -1.0f;
-static uint32_t g_coopLastPongMs = 0;
-static uint32_t g_coopLastPingMs = 0;
-static uint32_t g_coopRttSamples = 0;
-static uint32_t g_coopNetStatsLastRecvMs = 0;
+static float g_coopRttMs_[kCoopMaxPeers] = COOP_PER_PEER(-1.0f);
+#define g_coopRttMs g_coopRttMs_[g_coopPeerIdx]
+static uint32_t g_coopLastPongMs_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopLastPongMs g_coopLastPongMs_[g_coopPeerIdx]
+static uint32_t g_coopLastPingMs_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopLastPingMs g_coopLastPingMs_[g_coopPeerIdx]
+static uint32_t g_coopRttSamples_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopRttSamples g_coopRttSamples_[g_coopPeerIdx]
+static uint32_t g_coopNetStatsLastRecvMs_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopNetStatsLastRecvMs g_coopNetStatsLastRecvMs_[g_coopPeerIdx]
 
 static bool coopnet_send_message(CoopSocket sock, uint8_t type, const void* payload, uint16_t payloadLen)
 {
@@ -1864,7 +1987,8 @@ static bool coopnet_send_droppable(CoopSocket sock, uint8_t type, const void* pa
 
 // Set by coopnet_try_recv_message() when the peer closed the connection or the
 // socket failed hard; cleared whenever a new connection is set up.
-static bool g_coopPeerClosed = false;
+static bool g_coopPeerClosed_[kCoopMaxPeers] = COOP_PER_PEER(false);
+#define g_coopPeerClosed g_coopPeerClosed_[g_coopPeerIdx]
 
 // Tries to pull one complete message out of the accumulated receive buffer for
 // `sock`. Performs at most one non-blocking recv() call per invocation; caller
@@ -1973,7 +2097,8 @@ static bool coopnet_try_recv_message(CoopSocket sock, uint8_t* outType, unsigned
 static void coopnet_host_apply_saved_profile();
 static void coopnet_host_autosave_profile();
 static bool coopnet_host_companion_is_current();
-static uint32_t g_coopLastProfileAutosaveMs = 0;
+static uint32_t g_coopLastProfileAutosaveMs_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopLastProfileAutosaveMs g_coopLastProfileAutosaveMs_[g_coopPeerIdx]
 void coopnet_host_save_profile(const char* path);
 
 // The companion used to share obj_dude's own pid (0x1000000), which proto_ptr()
@@ -1986,12 +2111,42 @@ void coopnet_host_save_profile(const char* path);
 // player prototype; on the client that IS its own character (it loaded its
 // own save), and the host overwrites its copy with the client's numbers when
 // they arrive (COOP_MSG_CHARACTER).
+//
+// With several friends the host has one per friend slot: kCoopCompanionPid + slot.
+// A friend's PC always has its OWN character at kCoopCompanionPid, and sees the
+// other friends' characters as mirrors at kCoopMirrorCompanionPid + their slot.
 const int kCoopCompanionPid = 0x10003E7;
+const int kCoopMirrorCompanionPid = kCoopCompanionPid + kCoopMaxPeers;
 
-static Proto* coopnet_ensure_companion_proto()
+// The pid of the companion of the slot being handled.
+static int coopnet_slot_companion_pid()
+{
+    return kCoopCompanionPid + (g_coopRole == CoopRole::Host ? g_coopPeerIdx : 0);
+}
+
+// Any friend's character: a host's companion of any slot, or a mirror of one.
+static bool coopnet_is_companion_pid(int pid)
+{
+    return pid >= kCoopCompanionPid && pid < kCoopMirrorCompanionPid + kCoopMaxPeers;
+}
+
+// The pid the friend of the slot being handled is told for `critter`: another
+// friend's character goes out as a mirror (its own pid would be this friend's own
+// character on that PC).
+static int32_t coopnet_wire_pid(Object* critter)
+{
+    int slot = coopnet_slot_of_companion(critter);
+    if (slot != -1 && critter != g_coopCompanion) {
+        return kCoopMirrorCompanionPid + slot;
+    }
+    return critter->pid;
+}
+
+// A critter prototype at `pid`, copied from the player's own.
+static Proto* coopnet_ensure_player_proto_copy(int pid)
 {
     Proto* proto = NULL;
-    if (proto_ptr(kCoopCompanionPid, &proto) == 0 && proto != NULL) {
+    if (proto_ptr(pid, &proto) == 0 && proto != NULL) {
         return proto;
     }
 
@@ -2006,23 +2161,59 @@ static Proto* coopnet_ensure_companion_proto()
     }
 
     memcpy(proto, source, sizeof(CritterProto));
-    proto->pid = kCoopCompanionPid;
+    proto->pid = pid;
     return proto;
 }
 
+static Proto* coopnet_ensure_companion_proto()
+{
+    return coopnet_ensure_player_proto_copy(coopnet_slot_companion_pid());
+}
+
 // The name shown for the companion (the client's own character name once known).
-static char g_coopCompanionName[48] = "Companion";
+static char g_coopCompanionName_[kCoopMaxPeers][48] = COOP_PER_PEER("Companion");
+#define g_coopCompanionName g_coopCompanionName_[g_coopPeerIdx]
 
 const char* coopnet_get_companion_name()
 {
     return g_coopCompanionName;
 }
 
+// Client: every seat's character name, from the host (COOP_MSG_FRIEND_NAMES).
+static char g_coopMirrorNames[kCoopMaxPeers][32];
+
+// A mirror of another friend's character (a client sees those; they are not its own).
+static bool coopnet_is_mirror_pid(int pid)
+{
+    return pid >= kCoopMirrorCompanionPid && pid < kCoopMirrorCompanionPid + kCoopMaxPeers;
+}
+
+const char* coopnet_friend_name(Object* obj)
+{
+    if (obj == NULL) {
+        return NULL;
+    }
+    int slot = coopnet_slot_of_companion(obj);
+    if (slot != -1) {
+        return g_coopCompanionName_[slot];
+    }
+    if (g_coopRole == CoopRole::Client && coopnet_is_mirror_pid(obj->pid)) {
+        const char* name = g_coopMirrorNames[obj->pid - kCoopMirrorCompanionPid];
+        return name[0] != '\0' ? name : "Friend";
+    }
+    return NULL;
+}
+
+bool coopnet_is_friend_character(Object* obj)
+{
+    return obj != NULL && (coopnet_is_companion(obj) || (g_coopRole == CoopRole::Client && coopnet_is_mirror_pid(obj->pid)));
+}
+
 static Object* coopnet_find_or_spawn_companion(int pid, int tile, int elevation)
 {
-    if (pid == 0x1000000 || pid == kCoopCompanionPid) {
+    if (pid == 0x1000000 || coopnet_is_companion_pid(pid)) {
         if (coopnet_ensure_companion_proto() != NULL) {
-            pid = kCoopCompanionPid;
+            pid = coopnet_slot_companion_pid();
         } else {
             coopnet_report_glitch("Couldn't create the companion's own character data - it will share the host character's stats");
             pid = 0x1000000;
@@ -2146,7 +2337,8 @@ static void coopnet_purge_stale_companions(Object* keep)
     std::vector<Object*> stale;
     for (int elevation = 0; elevation < ELEVATION_COUNT; elevation++) {
         for (Object* o = obj_find_first_at(elevation); o != NULL; o = obj_find_next_at()) {
-            if (o != keep && o->pid == kCoopCompanionPid && FID_TYPE(o->fid) == OBJ_TYPE_CRITTER) {
+            bool companionPid = g_coopRole == CoopRole::Host ? (coopnet_is_companion_pid(o->pid) && o->pid < kCoopMirrorCompanionPid) : o->pid == kCoopCompanionPid;
+            if (o != keep && companionPid && !coopnet_is_companion(o) && FID_TYPE(o->fid) == OBJ_TYPE_CRITTER) {
                 stale.push_back(o);
             }
         }
@@ -2344,6 +2536,24 @@ const char* coopnet_get_connect_target()
     return g_coopConnectTarget;
 }
 
+// Host: gives the slot being handled its friend's character, standing on the
+// host's tile, with whatever this game's save remembers about it.
+static void coopnet_host_init_slot()
+{
+    g_coopCompanion = coopnet_find_or_spawn_companion(obj_dude->pid, obj_dude->tile, obj_dude->elevation);
+    if (g_coopCompanion == NULL) {
+        return;
+    }
+    coopnet_host_apply_saved_profile();
+
+    strncpy(g_coopHostLastMapName, map_data.name, sizeof(g_coopHostLastMapName) - 1);
+    g_coopHostLastMapName[sizeof(g_coopHostLastMapName) - 1] = '\0';
+    g_coopHostLastElevation = obj_dude->elevation;
+    g_coopCompanionGameOverSent = false;
+    g_coopLastFollowCheckTimeMs = coopnet_now_ms();
+    g_coopLastCommandedTile[0] = -1;
+}
+
 bool coopnet_start_host(int port)
 {
     if (g_coopRole == CoopRole::Host) {
@@ -2353,17 +2563,16 @@ bool coopnet_start_host(int port)
 
     coopnet_sockets_init();
 
-    g_coopCompanion = coopnet_find_or_spawn_companion(obj_dude->pid, obj_dude->tile, obj_dude->elevation);
+    // The first friend's seat is set up right away (as it always was); the
+    // others when a friend takes them. The companion pid depends on the role.
+    g_coopRole = CoopRole::Host;
+    g_coopPeerIdx = 0;
+    coopnet_host_init_slot();
+    g_coopRole = CoopRole::None;
     if (g_coopCompanion == NULL) {
         coopnet_status(COOP_STATUS_BAD, "Can't host: the companion character couldn't be created. Is a game loaded?");
         return false;
     }
-    coopnet_host_apply_saved_profile();
-
-    strncpy(g_coopHostLastMapName, map_data.name, sizeof(g_coopHostLastMapName) - 1);
-    g_coopHostLastMapName[sizeof(g_coopHostLastMapName) - 1] = '\0';
-    g_coopHostLastElevation = obj_dude->elevation;
-    g_coopCompanionGameOverSent = false;
 
     CoopSocket listenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (listenSocket == COOP_INVALID_SOCKET) {
@@ -2388,7 +2597,7 @@ bool coopnet_start_host(int port)
         return false;
     }
 
-    if (listen(listenSocket, 4) != 0) {
+    if (listen(listenSocket, 8) != 0) {
         int err = coopnet_last_socket_error();
         coopnet_close_socket(listenSocket);
         coopnet_status(COOP_STATUS_BAD, "Can't host: listen() failed (error %d).", err);
@@ -2670,13 +2879,17 @@ void coopnet_shutdown()
         coopnet_stage("co-op session ended (role %d, state %d)", static_cast<int>(g_coopRole), static_cast<int>(g_coopConnState));
     }
     coopnet_close_socket(g_coopListenSocket);
-    coopnet_close_socket(g_coopPeerSocket);
+    for (int slot = 0; slot < kCoopMaxPeers; slot++) {
+        g_coopPeerIdx = slot;
+        coopnet_close_socket(g_coopPeerSocket);
+        g_coopConnState = CoopConnState::Idle;
+        g_coopCompanion = NULL;
+        g_coopRecvBufferLen = 0;
+        g_coopLastCommandedTile[0] = -1;
+        g_coopLastCommandedTile[1] = -1;
+    }
+    g_coopPeerIdx = 0;
     g_coopRole = CoopRole::None;
-    g_coopConnState = CoopConnState::Idle;
-    g_coopCompanion = NULL;
-    g_coopRecvBufferLen = 0;
-    g_coopLastCommandedTile[0] = -1;
-    g_coopLastCommandedTile[1] = -1;
     coopnet_close_dialogue_window();
     coopnet_client_end_dialogue_visual();
     coopnet_close_worldmap_window();
@@ -2689,14 +2902,30 @@ CoopRole coopnet_get_role()
     return g_coopRole;
 }
 
+// Host: true while at least one friend is connected.
 bool coopnet_is_connected()
 {
-    return g_coopConnState == CoopConnState::Connected;
+    int slots = g_coopRole == CoopRole::Host ? kCoopMaxPeers : 1;
+    for (int slot = 0; slot < slots; slot++) {
+        if (g_coopConnState_[slot] == CoopConnState::Connected) {
+            return true;
+        }
+    }
+    return false;
 }
 
 Object* coopnet_get_companion()
 {
     return g_coopCompanion;
+}
+
+Object* coopnet_get_companion_slot(int slot)
+{
+    int slots = g_coopRole == CoopRole::Host ? kCoopMaxPeers : 1;
+    if (slot < 0 || slot >= slots) {
+        return NULL;
+    }
+    return g_coopCompanion_[slot];
 }
 
 static void coopnet_host_apply_move_intent(const CoopMoveIntent& intent)
@@ -2717,11 +2946,11 @@ static void coopnet_host_apply_move_intent(const CoopMoveIntent& intent)
     // still running toward the same spot) — don't restart the animation
     // for nothing. A same-tile click in a different gait (walk -> run) does
     // restart it, like vanilla's dude_move() -> dude_run() upgrade.
-    static uint8_t lastMoveWasRun = 0;
-    if (g_coopLastCommandedTile[0] == intent.targetTile && g_coopCompanion->tile != intent.targetTile && lastMoveWasRun == intent.run) {
+    static uint8_t lastMoveWasRun_[kCoopMaxPeers] = COOP_PER_PEER(0); // per friend
+    if (g_coopLastCommandedTile[0] == intent.targetTile && g_coopCompanion->tile != intent.targetTile && lastMoveWasRun_[g_coopPeerIdx] == intent.run) {
         return;
     }
-    lastMoveWasRun = intent.run;
+    lastMoveWasRun_[g_coopPeerIdx] = intent.run;
     g_coopHostLastMoveIntentMs = coopnet_now_ms();
 
     // Unlike the client's periodic position-apply (which waits for real
@@ -2780,8 +3009,12 @@ static void coopnet_host_apply_combat_move(int targetTile)
 // Tells the client why the companion's attack didn't happen, in the game's own
 // words (the same messages combat_attack_this() shows a normal player). The
 // Host: a line for the client's message box (what the host's own player would have been told).
-void coopnet_host_tell_client(const char* text)
+void coopnet_host_tell_client(Object* companion, const char* text)
 {
+    CoopSlotScope scope;
+    if (!coopnet_select_slot_of(companion)) {
+        return;
+    }
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected || text == NULL) {
         return;
     }
@@ -2839,8 +3072,10 @@ static void coopnet_host_apply_combat_attack(int32_t targetId, int32_t targetTil
 
 // A move or attack the client chose that arrived while the companion was still
 // animating -- run by coopnet_combat_input()'s loop as soon as it is idle.
-static CoopCombatAction g_coopHostPendingCombatAction;
-static bool g_coopHostPendingCombatActionValid = false;
+static CoopCombatAction g_coopHostPendingCombatAction_[kCoopMaxPeers];
+#define g_coopHostPendingCombatAction g_coopHostPendingCombatAction_[g_coopPeerIdx]
+static bool g_coopHostPendingCombatActionValid_[kCoopMaxPeers] = COOP_PER_PEER(false);
+#define g_coopHostPendingCombatActionValid g_coopHostPendingCombatActionValid_[g_coopPeerIdx]
 
 static void coopnet_host_run_combat_action(const CoopCombatAction& action)
 {
@@ -3078,32 +3313,48 @@ static void coopnet_host_broadcast_companion_inventory();
 // ---------------------------------------------------------------------------
 
 // Host side.
-static bool g_coopRemoteHostActive = false;
+static bool g_coopRemoteHostActive_[kCoopMaxPeers] = COOP_PER_PEER(false);
+#define g_coopRemoteHostActive g_coopRemoteHostActive_[g_coopPeerIdx]
 // Set around screens the client drives that aren't part of a conversation (loot).
-static bool g_coopRemoteForceDrive = false;
-static bool g_coopRemoteHostFull = false;
-static std::vector<uint8_t> g_coopRemoteShadow; // what the client's NEXT picture will hold (blocks sent so far this picture)
-static std::vector<uint8_t> g_coopRemoteShadowFront; // what the client is SHOWING (the last finished picture)
-static uint32_t g_coopRemoteCursorHash = 0; // of the pointer image the client holds (0 = none)
-static bool g_coopRemoteFramePending = false; // blocks of a picture have gone out but its end marker has not
-static bool g_coopRemoteMoviePaused = false; // a cutscene is playing: nothing is streamed
-static int g_coopRemoteShiftX = 0; // the scroll seen last time, tried first
-static int g_coopRemoteShiftY = 0;
-static std::vector<uint8_t> g_coopRemoteTileSent; // per tile: has it gone out at least once
-static std::vector<CoopRemoteInput> g_coopRemoteInputQueue;
+static bool g_coopRemoteForceDrive_[kCoopMaxPeers] = COOP_PER_PEER(false);
+#define g_coopRemoteForceDrive g_coopRemoteForceDrive_[g_coopPeerIdx]
+static bool g_coopRemoteHostFull_[kCoopMaxPeers] = COOP_PER_PEER(false);
+#define g_coopRemoteHostFull g_coopRemoteHostFull_[g_coopPeerIdx]
+static std::vector<uint8_t> g_coopRemoteShadow_[kCoopMaxPeers]; // what the client's NEXT picture will hold (blocks sent so far this picture)
+#define g_coopRemoteShadow g_coopRemoteShadow_[g_coopPeerIdx]
+static std::vector<uint8_t> g_coopRemoteShadowFront_[kCoopMaxPeers]; // what the client is SHOWING (the last finished picture)
+#define g_coopRemoteShadowFront g_coopRemoteShadowFront_[g_coopPeerIdx]
+static uint32_t g_coopRemoteCursorHash_[kCoopMaxPeers] = COOP_PER_PEER(0); // of the pointer image the client holds (0 = none)
+#define g_coopRemoteCursorHash g_coopRemoteCursorHash_[g_coopPeerIdx]
+static bool g_coopRemoteFramePending_[kCoopMaxPeers] = COOP_PER_PEER(false); // blocks of a picture have gone out but its end marker has not
+#define g_coopRemoteFramePending g_coopRemoteFramePending_[g_coopPeerIdx]
+static bool g_coopRemoteMoviePaused_[kCoopMaxPeers] = COOP_PER_PEER(false); // a cutscene is playing: nothing is streamed
+#define g_coopRemoteMoviePaused g_coopRemoteMoviePaused_[g_coopPeerIdx]
+static int g_coopRemoteShiftX_[kCoopMaxPeers] = COOP_PER_PEER(0); // the scroll seen last time, tried first
+#define g_coopRemoteShiftX g_coopRemoteShiftX_[g_coopPeerIdx]
+static int g_coopRemoteShiftY_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopRemoteShiftY g_coopRemoteShiftY_[g_coopPeerIdx]
+static std::vector<uint8_t> g_coopRemoteTileSent_[kCoopMaxPeers]; // per tile: has it gone out at least once
+#define g_coopRemoteTileSent g_coopRemoteTileSent_[g_coopPeerIdx]
+static std::vector<CoopRemoteInput> g_coopRemoteInputQueue_[kCoopMaxPeers];
+#define g_coopRemoteInputQueue g_coopRemoteInputQueue_[g_coopPeerIdx]
 static uint8_t g_coopRemotePalShadow[256 * 3];
-static uint32_t g_coopRemoteHostLastMs = 0;
-static uint32_t g_coopRemoteInputRecvMs = 0; // when the driver's input last arrived
+static uint32_t g_coopRemoteHostLastMs_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopRemoteHostLastMs g_coopRemoteHostLastMs_[g_coopPeerIdx]
+static uint32_t g_coopRemoteInputRecvMs_[kCoopMaxPeers] = COOP_PER_PEER(0); // when the driver's input last arrived
+#define g_coopRemoteInputRecvMs g_coopRemoteInputRecvMs_[g_coopPeerIdx]
 
 // Host-side. Call right before running a screen the client drives (barter,
 // "tell me about"); pairs with coopnet_remote_end(). No-op unless the current
 // conversation is client-driven.
-static bool g_coopRemoteViewOnly = false;
+static bool g_coopRemoteViewOnly_[kCoopMaxPeers] = COOP_PER_PEER(false);
+#define g_coopRemoteViewOnly g_coopRemoteViewOnly_[g_coopPeerIdx]
 
 static void coopnet_remote_begin_internal(bool viewOnly, bool travel = false);
 
 void coopnet_remote_begin()
 {
+    COOP_EACH_PEER(coopnet_remote_begin());
     if (g_coopDialogueDrivenByClient || g_coopRemoteForceDrive) {
         coopnet_remote_begin_internal(false);
     }
@@ -3112,11 +3363,17 @@ void coopnet_remote_begin()
 // World-map / town-map / elevator screens: the client ALWAYS sees the host's
 // screen; it operates it only when it triggered the trip (walked onto the exit
 // itself), otherwise it just watches while the host drives.
-static bool g_coopTravelClientDrives = false;
-static uint32_t g_coopTravelClientDrivesMs = 0;
+static bool g_coopTravelClientDrives_[kCoopMaxPeers] = COOP_PER_PEER(false);
+#define g_coopTravelClientDrives g_coopTravelClientDrives_[g_coopPeerIdx]
+static uint32_t g_coopTravelClientDrivesMs_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopTravelClientDrivesMs g_coopTravelClientDrivesMs_[g_coopPeerIdx]
 
-bool coopnet_host_companion_exit_allowed(int tile)
+bool coopnet_host_companion_exit_allowed(Object* companion, int tile)
 {
+    CoopSlotScope scope;
+    if (!coopnet_select_slot_of(companion)) {
+        return false;
+    }
     // Same as vanilla for the host's own character: stepping on ANY exit grid
     // tile while walking triggers it -- but only while the companion is
     // executing a walk/run the client itself ordered (never while merely
@@ -3140,8 +3397,12 @@ bool coopnet_host_companion_exit_allowed(int tile)
     return moving && g_coopLastCommandedTile[0] != -1 && coopnet_now_ms() - g_coopHostLastMoveIntentMs < 30000;
 }
 
-void coopnet_note_client_led_exit()
+void coopnet_note_client_led_exit(Object* companion)
 {
+    CoopSlotScope scope;
+    if (!coopnet_select_slot_of(companion)) {
+        return;
+    }
     g_coopTravelClientDrives = true;
     g_coopTravelClientDrivesMs = coopnet_now_ms();
 }
@@ -3149,10 +3410,12 @@ void coopnet_note_client_led_exit()
 // A conversation the client was driving just ended (see coopnet_notify_dialogue_end()):
 // a world-map trip that starts right after it is the client's -- the NPC sent
 // the party away ("get out of town") as the answer to what the client picked.
-static uint32_t g_coopTravelAfterClientDialogueMs = 0;
+static uint32_t g_coopTravelAfterClientDialogueMs_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopTravelAfterClientDialogueMs g_coopTravelAfterClientDialogueMs_[g_coopPeerIdx]
 
 void coopnet_travel_screen_begin()
 {
+    COOP_EACH_PEER(coopnet_travel_screen_begin());
     bool afterClientDialogue = g_coopTravelAfterClientDialogueMs != 0 && coopnet_now_ms() - g_coopTravelAfterClientDialogueMs < 5000;
     g_coopTravelAfterClientDialogueMs = 0;
     bool clientDrives = (g_coopTravelClientDrives && coopnet_now_ms() - g_coopTravelClientDrivesMs < 15000) || afterClientDialogue;
@@ -3162,6 +3425,7 @@ void coopnet_travel_screen_begin()
 
 void coopnet_travel_screen_end()
 {
+    COOP_EACH_PEER(coopnet_travel_screen_end());
     coopnet_remote_end();
 }
 
@@ -3170,12 +3434,18 @@ void coopnet_travel_screen_end()
 // opens as a result. Same pending+timeout idiom as the dialogue driver flag
 // above; today the only consumer is the elevator screen (elevator_select() has
 // no actor parameter at all to check directly -- see coopnet_elevator_screen_begin()).
-static bool g_coopElevatorDriverPending = false;
-static uint32_t g_coopElevatorDriverPendingMs = 0;
+static bool g_coopElevatorDriverPending_[kCoopMaxPeers] = COOP_PER_PEER(false);
+#define g_coopElevatorDriverPending g_coopElevatorDriverPending_[g_coopPeerIdx]
+static uint32_t g_coopElevatorDriverPendingMs_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopElevatorDriverPendingMs g_coopElevatorDriverPendingMs_[g_coopPeerIdx]
 const uint32_t kCoopElevatorDriverPendingTimeoutMs = 4000;
 
-void coopnet_note_companion_used_object()
+void coopnet_note_companion_used_object(Object* companion)
 {
+    CoopSlotScope scope;
+    if (!coopnet_select_slot_of(companion)) {
+        return;
+    }
     g_coopElevatorDriverPending = true;
     g_coopElevatorDriverPendingMs = coopnet_now_ms();
 }
@@ -3192,10 +3462,12 @@ static bool coopnet_elevator_driven_by_client()
 // barter/loot screens had before they got the same remote-screen treatment).
 void coopnet_elevator_screen_begin()
 {
+    COOP_EACH_PEER(coopnet_elevator_screen_begin());
     bool clientDrives = coopnet_elevator_driven_by_client();
     g_coopElevatorDriverPending = false;
-    if (g_coopRole == CoopRole::Host && g_coopConnState == CoopConnState::Connected) {
-        coopnet_status(COOP_STATUS_INFO, "Elevator screen opened - %s picks the floor.", clientDrives ? "your friend" : "you");
+    // Said once, by the seat whose friend drives (every other seat only watches).
+    if (g_coopRole == CoopRole::Host && g_coopConnState == CoopConnState::Connected && clientDrives) {
+        coopnet_status(COOP_STATUS_INFO, "Elevator screen opened - %s picks the floor.", g_coopCompanionName);
     }
     g_coopRemoteForceDrive = true;
     coopnet_remote_begin_internal(!clientDrives);
@@ -3203,6 +3475,7 @@ void coopnet_elevator_screen_begin()
 
 void coopnet_elevator_screen_end()
 {
+    COOP_EACH_PEER(coopnet_elevator_screen_end());
     g_coopRemoteForceDrive = false;
     coopnet_remote_end();
 }
@@ -3216,6 +3489,7 @@ void coopnet_elevator_screen_end()
 // camera, not to relocate anyone).
 void coopnet_host_move_companion_with_dude()
 {
+    COOP_EACH_PEER(coopnet_host_move_companion_with_dude());
     if (g_coopRole != CoopRole::Host || g_coopCompanion == NULL || obj_dude == NULL) {
         return;
     }
@@ -3253,11 +3527,12 @@ static void coopnet_remote_begin_internal(bool viewOnly, bool travel)
     msg.viewOnly = viewOnly ? 1 : 0;
     msg.travel = travel ? 1 : 0;
     coopnet_send_message(g_coopPeerSocket, COOP_MSG_REMOTE_BEGIN, &msg, sizeof(msg));
-    debug_printf("\nCoop: remote screen began (%dx%d) viewOnly=%d\n", msg.width, msg.height, msg.viewOnly);
+    debug_printf("\nCoop: remote screen began (%dx%d) viewOnly=%d seat %d travel=%d\n", msg.width, msg.height, msg.viewOnly, g_coopPeerIdx + 1, msg.travel);
 }
 
 void coopnet_remote_end()
 {
+    COOP_EACH_PEER(coopnet_remote_end());
     if (!g_coopRemoteHostActive) {
         return;
     }
@@ -3270,7 +3545,13 @@ static void coopnet_remote_host_apply_one_input();
 
 bool coopnet_remote_host_owns_mouse()
 {
-    return g_coopRemoteHostActive && !g_coopRemoteViewOnly;
+    int slots = g_coopRole == CoopRole::Host ? kCoopMaxPeers : 1;
+    for (int slot = 0; slot < slots; slot++) {
+        if (g_coopRemoteHostActive_[slot] && !g_coopRemoteViewOnly_[slot]) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Host side, once per presented frame while active (hooked from
@@ -3579,8 +3860,10 @@ static void coopnet_remote_host_apply_input(const CoopRemoteInput& in)
 }
 
 // Mouse buttons as the host last applied them, and when one last went down.
-static int g_coopRemoteAppliedButtons = 0;
-static uint32_t g_coopRemoteDownMs = 0;
+static int g_coopRemoteAppliedButtons_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopRemoteAppliedButtons g_coopRemoteAppliedButtons_[g_coopPeerIdx]
+static uint32_t g_coopRemoteDownMs_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopRemoteDownMs g_coopRemoteDownMs_[g_coopPeerIdx]
 
 static void coopnet_remote_host_apply_one_input()
 {
@@ -3696,9 +3979,9 @@ bool coopnet_client_movie_should_stop()
     return g_coopClientPlayingHostMovie && !g_coopClientHostMovieActive;
 }
 
-void coopnet_movie_begin(int movie, int flags)
+static void coopnet_movie_begin_peer(int movie, int flags)
 {
-    g_coopMovieDepth++;
+    COOP_EACH_PEER(coopnet_movie_begin_peer(movie, flags));
     // Tell the client to play the same cutscene from its own copy of the game.
     if (g_coopRole == CoopRole::Host && g_coopConnState == CoopConnState::Connected) {
         int32_t message[2] = { movie, flags };
@@ -3713,11 +3996,15 @@ void coopnet_movie_begin(int movie, int flags)
     }
 }
 
-void coopnet_movie_end()
+void coopnet_movie_begin(int movie, int flags)
 {
-    if (g_coopMovieDepth > 0) {
-        g_coopMovieDepth--;
-    }
+    g_coopMovieDepth++;
+    coopnet_movie_begin_peer(movie, flags);
+}
+
+static void coopnet_movie_end_peer()
+{
+    COOP_EACH_PEER(coopnet_movie_end_peer());
     if (g_coopRole == CoopRole::Host && g_coopConnState == CoopConnState::Connected) {
         coopnet_send_message(g_coopPeerSocket, COOP_MSG_MOVIE_STOP, NULL, 0);
     }
@@ -3736,6 +4023,14 @@ void coopnet_movie_end()
         g_coopPendingTransitionValid = false;
         coopnet_client_apply_map_transition(g_coopPendingTransition);
     }
+}
+
+void coopnet_movie_end()
+{
+    if (g_coopMovieDepth > 0) {
+        g_coopMovieDepth--;
+    }
+    coopnet_movie_end_peer();
 }
 static int g_coopRemoteW = 0;
 static int g_coopRemoteH = 0;
@@ -4093,6 +4388,7 @@ static void coopnet_remote_client_tick()
 // Called by renderPresent() (svga.cc) before every present.
 void coopnet_remote_screen_frame_hook()
 {
+    COOP_EACH_PEER(coopnet_remote_screen_frame_hook());
     if (g_coopRemoteHostActive) {
         coopnet_remote_host_tick();
     } else if (g_coopRemoteClientActive) {
@@ -4104,6 +4400,7 @@ void coopnet_remote_screen_frame_hook()
 // inventory changed, so refresh what the client sees.
 void coopnet_after_client_barter()
 {
+    COOP_EACH_PEER(coopnet_after_client_barter());
     if (g_coopRole == CoopRole::Host && g_coopConnState == CoopConnState::Connected && g_coopDialogueDrivenByClient) {
         coopnet_host_broadcast_companion_inventory();
     }
@@ -4115,10 +4412,14 @@ void coopnet_after_client_barter()
 // writes (vault water counter, addiction flags) that never go through
 // game_set_global_var(). -1 length = nothing sent yet (a fresh connection
 // resets it so the whole array goes out again).
-static std::vector<int32_t> g_coopGvarShadow;
-static bool g_coopGvarShadowValid = false;
-static int g_coopGvarSliceCursor = 0;
-static uint32_t g_coopGvarLastSliceMs = 0;
+static std::vector<int32_t> g_coopGvarShadow_[kCoopMaxPeers];
+#define g_coopGvarShadow g_coopGvarShadow_[g_coopPeerIdx]
+static bool g_coopGvarShadowValid_[kCoopMaxPeers] = COOP_PER_PEER(false);
+#define g_coopGvarShadowValid g_coopGvarShadowValid_[g_coopPeerIdx]
+static int g_coopGvarSliceCursor_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopGvarSliceCursor g_coopGvarSliceCursor_[g_coopPeerIdx]
+static uint32_t g_coopGvarLastSliceMs_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopGvarLastSliceMs g_coopGvarLastSliceMs_[g_coopPeerIdx]
 const uint32_t kCoopGvarSliceIntervalMs = 1000;
 
 static void coopnet_send_gvar_entries(const CoopGvarEntry* entries, int count)
@@ -4226,13 +4527,13 @@ static void coopnet_host_broadcast_positions()
 // during normal play, and in large jumps during worldmap travel.
 static void coopnet_host_broadcast_game_time()
 {
-    static int32_t lastSentGameTime = -1;
+    static int32_t lastSentGameTime_[kCoopMaxPeers] = COOP_PER_PEER(-1); // per friend
 
     int32_t current = static_cast<int32_t>(game_time());
-    if (current == lastSentGameTime) {
+    if (current == lastSentGameTime_[g_coopPeerIdx]) {
         return;
     }
-    lastSentGameTime = current;
+    lastSentGameTime_[g_coopPeerIdx] = current;
 
     CoopGameTime msg;
     msg.gameTime = current;
@@ -4256,13 +4557,13 @@ static void coopnet_host_broadcast_combat_participants()
         Object* critter = combat_get_list_item(i);
         // pid 0x1000000 is the player character's prototype: only ever obj_dude
         // or the companion (never a streamed NPC) -- see coopnet_host_broadcast_world().
-        if (critter == NULL || critter == obj_dude || critter == g_coopCompanion || (critter->pid == 0x1000000 || critter->pid == kCoopCompanionPid)) {
+        if (critter == NULL || critter == obj_dude || critter == g_coopCompanion || critter->pid == 0x1000000) {
             continue;
         }
 
         CoopCombatParticipant participant;
         participant.id = critter->id;
-        participant.pid = critter->pid;
+        participant.pid = coopnet_wire_pid(critter);
         participant.tile = critter->tile;
         participant.elevation = critter->elevation;
         participant.rotation = critter->rotation;
@@ -4304,11 +4605,16 @@ struct CoopWorldItemShadow {
     bool seen;
     uint32_t lastSentMs;
 };
-static std::vector<CoopWorldItemShadow> g_coopWorldItemShadow;
-static std::vector<CoopWorldShadow> g_coopWorldShadow;
-static uint32_t g_coopWorldLastMs = 0;
-static Object* g_coopWorldStampDude = NULL;
-static int g_coopWorldStampMap = -2;
+static std::vector<CoopWorldItemShadow> g_coopWorldItemShadow_[kCoopMaxPeers];
+#define g_coopWorldItemShadow g_coopWorldItemShadow_[g_coopPeerIdx]
+static std::vector<CoopWorldShadow> g_coopWorldShadow_[kCoopMaxPeers];
+#define g_coopWorldShadow g_coopWorldShadow_[g_coopPeerIdx]
+static uint32_t g_coopWorldLastMs_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopWorldLastMs g_coopWorldLastMs_[g_coopPeerIdx]
+static Object* g_coopWorldStampDude_[kCoopMaxPeers] = COOP_PER_PEER(NULL);
+#define g_coopWorldStampDude g_coopWorldStampDude_[g_coopPeerIdx]
+static int g_coopWorldStampMap_[kCoopMaxPeers] = COOP_PER_PEER(-2);
+#define g_coopWorldStampMap g_coopWorldStampMap_[g_coopPeerIdx]
 const uint32_t kCoopWorldIntervalMs = 100;
 const uint32_t kCoopWorldRefreshMs = 1500;
 const int kCoopWorldRadius = 45;
@@ -4336,18 +4642,18 @@ static bool coopnet_host_critter_exists(int32_t id, int32_t pid)
 // Host-side only: sends a CoopStateCheck every few seconds (see its comment).
 static void coopnet_host_send_state_check()
 {
-    static uint32_t lastMs = 0;
-    static uint32_t serial = 0;
+    static uint32_t lastMs_[kCoopMaxPeers] = COOP_PER_PEER(0); // per friend
+    static uint32_t serial_[kCoopMaxPeers] = COOP_PER_PEER(0); // per friend
     uint32_t now = coopnet_now_ms();
-    if (now - lastMs < 3000 || obj_dude == NULL || g_coopCompanion == NULL || g_coopRemoteHostActive
+    if (now - lastMs_[g_coopPeerIdx] < 3000 || obj_dude == NULL || g_coopCompanion == NULL || g_coopRemoteHostActive
         || !coopnet_host_companion_is_current()) {
         return;
     }
-    lastMs = now;
+    lastMs_[g_coopPeerIdx] = now;
 
     CoopStateCheck check;
     memset(&check, 0, sizeof(check));
-    check.serial = ++serial;
+    check.serial = ++serial_[g_coopPeerIdx];
 
     Object* players[2] = { obj_dude, g_coopCompanion };
     for (int p = 0; p < 2; p++) {
@@ -4362,7 +4668,7 @@ static void coopnet_host_send_state_check()
     }
 
     for (Object* o = obj_find_first_at(obj_dude->elevation); o != NULL && check.count < kCoopStateCheckMax; o = obj_find_next_at()) {
-        if (FID_TYPE(o->fid) != OBJ_TYPE_CRITTER || o == obj_dude || o == g_coopCompanion || o->pid == 0x1000000 || o->pid == kCoopCompanionPid
+        if (FID_TYPE(o->fid) != OBJ_TYPE_CRITTER || o == obj_dude || o == g_coopCompanion || o->pid == 0x1000000
             || (o->flags & OBJECT_HIDDEN) != 0 || o->tile == -1 || anim_busy(o)) {
             continue;
         }
@@ -4371,7 +4677,7 @@ static void coopnet_host_send_state_check()
         }
         CoopStateCheckEntry& e = check.entries[check.count++];
         e.id = o->id;
-        e.pid = o->pid;
+        e.pid = coopnet_wire_pid(o);
         e.tile = o->tile;
         e.elevation = static_cast<uint8_t>(o->elevation);
         e.dead = critter_is_dead(o) ? 1 : 0;
@@ -4451,7 +4757,7 @@ static void coopnet_host_broadcast_world()
             // temporarily swaps obj_dude for the companion, which made the real
             // host character look like an NPC here -- the client then spawned a
             // "copy of the companion" that vanished a moment later.
-            if (FID_TYPE(critter->fid) != OBJ_TYPE_CRITTER || critter == obj_dude || critter == g_coopCompanion || (critter->pid == 0x1000000 || critter->pid == kCoopCompanionPid)) {
+            if (FID_TYPE(critter->fid) != OBJ_TYPE_CRITTER || critter == obj_dude || critter == g_coopCompanion || critter->pid == 0x1000000) {
                 continue;
             }
             if ((critter->flags & OBJECT_HIDDEN) != 0 || critter->tile == -1) {
@@ -4512,7 +4818,7 @@ static void coopnet_host_broadcast_world()
 
             CoopCombatParticipant participant;
             participant.id = critter->id;
-            participant.pid = critter->pid;
+            participant.pid = coopnet_wire_pid(critter);
             participant.tile = critter->tile;
             participant.elevation = critter->elevation;
             participant.rotation = critter->rotation;
@@ -4642,7 +4948,8 @@ static void coopnet_host_broadcast_world()
 // Which hand the companion is wielding with (interface item slot). The host's
 // value is authoritative; the client updates it via INVENTORY_PUSH whenever it
 // switches hands or closes its inventory.
-static uint8_t g_coopCompanionActiveHand = 1;
+static uint8_t g_coopCompanionActiveHand_[kCoopMaxPeers] = COOP_PER_PEER(1);
+#define g_coopCompanionActiveHand g_coopCompanionActiveHand_[g_coopPeerIdx]
 
 static void coopnet_build_inventory_snapshot(Object* critter, CoopInventorySync& sync)
 {
@@ -4741,8 +5048,10 @@ static uint32_t coopnet_companion_inventory_hash()
 // The host spends the friend's ammo when it shoots, and the friend can pick things up or use them;
 // the client only ever got the inventory when connecting or when a map loaded, so its copy ran empty
 // ("ammunition has run out" while the host's character still had ammo). Re-send it whenever it changes.
-static uint32_t g_coopInvWatchHash = 0;
-static uint32_t g_coopInvWatchMs = 0;
+static uint32_t g_coopInvWatchHash_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopInvWatchHash g_coopInvWatchHash_[g_coopPeerIdx]
+static uint32_t g_coopInvWatchMs_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopInvWatchMs g_coopInvWatchMs_[g_coopPeerIdx]
 
 static void coopnet_host_inventory_watch()
 {
@@ -4803,9 +5112,10 @@ static bool coopnet_host_companion_is_current()
         && strncmp(g_coopHostLastMapName, map_data.name, sizeof(g_coopHostLastMapName)) == 0;
 }
 
-bool coopnet_companion_is_current()
+bool coopnet_companion_is_current(Object* companion)
 {
-    return g_coopRole == CoopRole::Host && g_coopCompanion != NULL && coopnet_host_companion_is_current();
+    CoopSlotScope scope;
+    return g_coopRole == CoopRole::Host && coopnet_select_slot_of(companion) && coopnet_host_companion_is_current();
 }
 
 static void coopnet_host_send_scenery_list();
@@ -5078,7 +5388,8 @@ struct CoopSceneryDeltaHeader {
     uint16_t count;
 };
 
-static std::set<uint64_t> g_coopHostSceneryKeys; // what the client has been told exists
+static std::set<uint64_t> g_coopHostSceneryKeys_[kCoopMaxPeers]; // what the client has been told exists
+#define g_coopHostSceneryKeys g_coopHostSceneryKeys_[g_coopPeerIdx]
 
 // Scenery and loose ground items are matched to the host's map: an encounter's loot is
 // placed by a script the client runs with different luck (missing loot on the client).
@@ -5449,10 +5760,10 @@ static void coopnet_host_on_client_lost()
     g_coopLastProfileAutosaveMs = 0;
     coopnet_host_autosave_profile();
 
-    char message[40];
-    strcpy(message, "Client left the game.");
+    char message[80];
+    snprintf(message, sizeof(message), "%s left the game.", g_coopCompanionName);
     display_print(message);
-    debug_printf("\nCoop: client lost -- host control restored\n");
+    debug_printf("\nCoop: friend %d lost -- host control restored\n", g_coopPeerIdx + 1);
 }
 
 static void coopnet_host_process_action_queue()
@@ -5566,7 +5877,7 @@ static void coopnet_host_process_action_queue()
                 // Consumed by whichever screen this use opens next (currently
                 // only elevator_select() checks it) -- harmlessly expires
                 // unused for every other kind of "use" (doors, etc.).
-                coopnet_note_companion_used_object();
+                coopnet_note_companion_used_object(g_coopCompanion);
                 int useRc = action_use_an_object(g_coopCompanion, object);
                 int useSid = -1;
                 obj_sid(object, &useSid);
@@ -5603,14 +5914,18 @@ static char g_coopActiveCharPath[80] = "";
 
 // Host: this world's record of the client's character (blobLen 0 = none yet).
 // Written into the host's save slot with the rest of the client's profile.
-static CoopCharBlob g_coopHostCharRecord;
+static CoopCharBlob g_coopHostCharRecord_[kCoopMaxPeers];
+#define g_coopHostCharRecord g_coopHostCharRecord_[g_coopPeerIdx]
 
 // Host: the character as the client joined this session (for a save that has no
 // record of its own), the experience of the last progress report the host
 // accepted, and the experience the host itself handed out since then.
-static CoopCharBlob g_coopHostJoinBaseline;
-static int32_t g_coopHostAcceptedXp = -1;
-static int64_t g_coopHostXpGranted = 0;
+static CoopCharBlob g_coopHostJoinBaseline_[kCoopMaxPeers];
+#define g_coopHostJoinBaseline g_coopHostJoinBaseline_[g_coopPeerIdx]
+static int32_t g_coopHostAcceptedXp_[kCoopMaxPeers] = COOP_PER_PEER(-1);
+#define g_coopHostAcceptedXp g_coopHostAcceptedXp_[g_coopPeerIdx]
+static int64_t g_coopHostXpGranted_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopHostXpGranted g_coopHostXpGranted_[g_coopPeerIdx]
 
 static const char* const kCoopCharTransferPath = "COOPCHARS\\_xfer.tmp";
 
@@ -5681,7 +5996,7 @@ static void coopnet_client_refresh_companion_from_pc()
     }
     memcpy(&(dest->critter.data), &(source->critter.data), sizeof(CritterProtoData));
 
-    if (g_coopCompanion != NULL && g_coopCompanion->pid == kCoopCompanionPid) {
+    if (g_coopCompanion != NULL && g_coopCompanion->pid == coopnet_slot_companion_pid()) {
         int maxHp = stat_level(g_coopCompanion, STAT_MAXIMUM_HIT_POINTS);
         if (g_coopCompanion->data.critter.hp > maxHp) {
             g_coopCompanion->data.critter.hp = maxHp;
@@ -5820,9 +6135,12 @@ static void coopnet_host_apply_client_character(const CoopCharacter& c, bool ann
 // a map throws every critter prototype away, and the companion's one is then rebuilt from the plain player
 // prototype -- without the client's traits, perks and skills -- so the numbers are kept here and put back
 // whenever the signature of the prototype no longer matches (coopnet_keep_companion_character()).
-static CoopCharacter g_coopCharMsg;
-static bool g_coopCharKnown = false;
-static uint32_t g_coopCharSig = 0;
+static CoopCharacter g_coopCharMsg_[kCoopMaxPeers];
+#define g_coopCharMsg g_coopCharMsg_[g_coopPeerIdx]
+static bool g_coopCharKnown_[kCoopMaxPeers] = COOP_PER_PEER(false);
+#define g_coopCharKnown g_coopCharKnown_[g_coopPeerIdx]
+static uint32_t g_coopCharSig_[kCoopMaxPeers] = COOP_PER_PEER(0);
+#define g_coopCharSig g_coopCharSig_[g_coopPeerIdx]
 
 static void coopnet_client_send_character()
 {
@@ -5887,7 +6205,7 @@ static void coopnet_host_apply_client_character(const CoopCharacter& c, bool ann
     }
 
     Proto* proto = coopnet_ensure_companion_proto();
-    if (proto == NULL || g_coopCompanion->pid != kCoopCompanionPid) {
+    if (proto == NULL || g_coopCompanion->pid != coopnet_slot_companion_pid()) {
         coopnet_report_glitch("Client's character couldn't be applied: the companion has no data of its own (shares the host's)");
         return;
     }
@@ -5963,7 +6281,7 @@ static void coopnet_host_apply_client_character(const CoopCharacter& c, bool ann
 // Both roles: puts the client's character back on the companion after a map load rebuilt its prototype.
 static void coopnet_keep_companion_character()
 {
-    if (g_coopCompanion == NULL || g_coopCompanion->pid != kCoopCompanionPid) {
+    if (g_coopCompanion == NULL || g_coopCompanion->pid != coopnet_slot_companion_pid()) {
         return;
     }
     if (g_coopRole == CoopRole::Host ? !coopnet_host_companion_is_current() : g_coopClientMapLoading) {
@@ -5971,7 +6289,7 @@ static void coopnet_keep_companion_character()
     }
 
     Proto* proto = NULL;
-    if (proto_ptr(kCoopCompanionPid, &proto) != 0 || proto == NULL) {
+    if (proto_ptr(coopnet_slot_companion_pid(), &proto) != 0 || proto == NULL) {
         // The prototype was thrown away with the others after the companion was spawned: the
         // character was left with every stat at 0 (no hit points, no action points) until the
         // next map change -- found by the rads_carry autotest. Make it again.
@@ -6000,12 +6318,12 @@ static void coopnet_keep_companion_character()
 // the options screen gets pulled straight back to the host's.
 static void coopnet_host_broadcast_settings()
 {
-    static uint32_t lastSentMs = 0;
+    static uint32_t lastSentMs_[kCoopMaxPeers] = COOP_PER_PEER(0); // per friend
     uint32_t now = coopnet_now_ms();
-    if (g_coopConnState != CoopConnState::Connected || now - lastSentMs < 5000) {
+    if (g_coopConnState != CoopConnState::Connected || now - lastSentMs_[g_coopPeerIdx] < 5000) {
         return;
     }
-    lastSentMs = now;
+    lastSentMs_[g_coopPeerIdx] = now;
 
     CoopSettings settings;
     settings.gameDifficulty = 1;
@@ -6017,38 +6335,43 @@ static void coopnet_host_broadcast_settings()
     config_get_value(&game_config, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_COMBAT_DIFFICULTY_KEY, &settings.combatDifficulty);
     config_get_value(&game_config, GAME_CONFIG_PREFERENCES_KEY, GAME_CONFIG_COMBAT_SPEED_KEY, &settings.combatSpeed);
     coopnet_send_message(g_coopPeerSocket, COOP_MSG_SETTINGS, &settings, sizeof(settings));
+
+    CoopFriendNames names;
+    memset(&names, 0, sizeof(names));
+    for (int slot = 0; slot < kCoopMaxPeers; slot++) {
+        if (g_coopCompanion_[slot] != NULL) {
+            snprintf(names.names[slot], sizeof(names.names[slot]), "%s", g_coopCompanionName_[slot]);
+        }
+    }
+    coopnet_send_message(g_coopPeerSocket, COOP_MSG_FRIEND_NAMES, &names, sizeof(names));
 }
 
-static void coopnet_poll_host()
+// Host: what the slot being handled goes back to when its connection ends: a
+// seat kept for its friend while its character stands in the world, unused
+// otherwise.
+static CoopConnState coopnet_host_free_seat_state()
 {
-    coopnet_host_autosave_profile();
-    coopnet_protect_companion_item_scripts();
-    coopnet_host_check_map_transition();
-    coopnet_host_check_companion_death();
-    coopnet_host_inventory_watch();
-    coopnet_keep_companion_character();
+    return g_coopCompanion != NULL || g_coopPeerIdx == 0 ? CoopConnState::Listening : CoopConnState::Idle;
+}
 
-    if (g_coopConnState == CoopConnState::Listening) {
-        sockaddr_in clientAddr;
+// Host: takes a waiting connection, if any, into a friend slot -- a seat kept
+// for a friend (the first one, or one whose friend left: its character is still
+// there, following the host), else an unused seat. With every seat taken, the
+// connection silent the longest is replaced: a friend whose game crashed or
+// restarted reconnects before this side has noticed the old connection died (it
+// can take up to the 2 minute heartbeat timeout), and refusing the newcomer for
+// minutes looked exactly like "he can't join".
+static void coopnet_host_accept_connection()
+{
+    sockaddr_in clientAddr;
 #ifdef _WIN32
-        int addrLen = sizeof(clientAddr);
+    int addrLen = sizeof(clientAddr);
 #else
-        socklen_t addrLen = sizeof(clientAddr);
+    socklen_t addrLen = sizeof(clientAddr);
 #endif
-        CoopSocket accepted = accept(g_coopListenSocket, reinterpret_cast<sockaddr*>(&clientAddr), &addrLen);
-        if (accepted != COOP_INVALID_SOCKET) {
-            g_coopHostIncomingAttempts++;
-            char fromText[48] = "?";
-            inet_ntop(AF_INET, &clientAddr.sin_addr, fromText, sizeof(fromText));
-            coopnet_status(COOP_STATUS_INFO, "Connection #%d arrived from %s - waiting for its hello...", g_coopHostIncomingAttempts, fromText);
-            coopnet_set_nonblocking(accepted);
-            g_coopPeerSocket = accepted;
-            g_coopRecvBufferLen = 0;
-            g_coopConnState = CoopConnState::WaitingForHello;
-            g_coopPeerClosed = false;
-            g_coopLastRecvTimeMs = coopnet_now_ms();
-            g_coopHostHelloStartMs = g_coopLastRecvTimeMs;
-        } else if (g_coopHostIncomingAttempts == 0 && !g_coopHostNoAttemptWarned
+    CoopSocket accepted = accept(g_coopListenSocket, reinterpret_cast<sockaddr*>(&clientAddr), &addrLen);
+    if (accepted == COOP_INVALID_SOCKET) {
+        if (g_coopHostIncomingAttempts == 0 && !g_coopHostNoAttemptWarned
             && coopnet_now_ms() - g_coopHostListenStartMs > 60000) {
             // Nothing has even knocked. The problem is between the two PCs,
             // not in either game -- say where to look.
@@ -6058,34 +6381,136 @@ static void coopnet_poll_host()
             coopnet_status(COOP_STATUS_WARN, "on the same Radmin/VPN network, and Windows Firewall isn't blocking this");
             coopnet_status(COOP_STATUS_WARN, "game (run Allow_Firewall.bat). His screen shows the exact error.");
         }
-    } else if (g_coopConnState == CoopConnState::Connected) {
-        // A friend whose game crashed/restarted reconnects before this side
-        // has noticed the old connection died (it can take up to the 2
-        // minute heartbeat timeout). The newcomer is by far the likelier
-        // real one -- take the new connection instead of ignoring it for
-        // minutes, which looked exactly like "he can't join".
-        sockaddr_in clientAddr;
-#ifdef _WIN32
-        int addrLen = sizeof(clientAddr);
-#else
-        socklen_t addrLen = sizeof(clientAddr);
-#endif
-        CoopSocket fresh = accept(g_coopListenSocket, reinterpret_cast<sockaddr*>(&clientAddr), &addrLen);
-        if (fresh != COOP_INVALID_SOCKET) {
-            g_coopHostIncomingAttempts++;
-            char fromText[48] = "?";
-            inet_ntop(AF_INET, &clientAddr.sin_addr, fromText, sizeof(fromText));
-            coopnet_status(COOP_STATUS_WARN, "Connection #%d arrived from %s while a friend was still marked connected - replacing the old connection.", g_coopHostIncomingAttempts, fromText);
-            coopnet_close_socket(g_coopPeerSocket);
-            coopnet_host_on_client_lost();
-            coopnet_set_nonblocking(fresh);
-            g_coopPeerSocket = fresh;
-            g_coopRecvBufferLen = 0;
-            g_coopConnState = CoopConnState::WaitingForHello;
-            g_coopPeerClosed = false;
-            g_coopLastRecvTimeMs = coopnet_now_ms();
-            g_coopHostHelloStartMs = g_coopLastRecvTimeMs;
+        return;
+    }
+
+    g_coopHostIncomingAttempts++;
+    char fromText[48] = "?";
+    inet_ntop(AF_INET, &clientAddr.sin_addr, fromText, sizeof(fromText));
+
+    int slot = -1;
+    for (int s = 0; s < kCoopMaxPeers && slot == -1; s++) {
+        if (g_coopConnState_[s] == CoopConnState::Listening) {
+            slot = s;
         }
+    }
+    for (int s = 0; s < kCoopMaxPeers && slot == -1; s++) {
+        if (g_coopConnState_[s] == CoopConnState::Idle) {
+            slot = s;
+        }
+    }
+    bool replacing = false;
+    if (slot == -1) {
+        uint32_t now = coopnet_now_ms();
+        uint32_t longestSilence = 0;
+        for (int s = 0; s < kCoopMaxPeers; s++) {
+            uint32_t silence = now - g_coopLastRecvTimeMs_[s];
+            if (slot == -1 || silence > longestSilence) {
+                slot = s;
+                longestSilence = silence;
+            }
+        }
+        replacing = true;
+    }
+
+    g_coopPeerIdx = slot;
+    if (replacing) {
+        coopnet_status(COOP_STATUS_WARN, "Connection #%d arrived from %s with every seat taken - replacing friend %d's connection (the quietest).", g_coopHostIncomingAttempts, fromText, slot + 1);
+        coopnet_close_socket(g_coopPeerSocket);
+        if (g_coopConnState == CoopConnState::Connected) {
+            coopnet_host_on_client_lost();
+        }
+    } else {
+        coopnet_status(COOP_STATUS_INFO, "Connection #%d arrived from %s (seat %d) - waiting for its hello...", g_coopHostIncomingAttempts, fromText, slot + 1);
+    }
+    coopnet_set_nonblocking(accepted);
+    g_coopPeerSocket = accepted;
+    g_coopRecvBufferLen = 0;
+    g_coopConnState = CoopConnState::WaitingForHello;
+    g_coopPeerClosed = false;
+    g_coopLastRecvTimeMs = coopnet_now_ms();
+    g_coopHostHelloStartMs = g_coopLastRecvTimeMs;
+}
+
+// Host, on a friend's HELLO in the slot being handled: a friend coming back
+// moves to the seat kept for its character (its name), and a newcomer that
+// landed on a seat kept for somebody else moves to an unused one. The slot
+// being handled becomes the friend's seat.
+static void coopnet_host_seat_by_name(const char* name)
+{
+    if (name == NULL || name[0] == '\0') {
+        return;
+    }
+    int here = g_coopPeerIdx;
+    int target = -1;
+    for (int t = 0; t < kCoopMaxPeers && target == -1; t++) {
+        if (t != here && g_coopConnState_[t] == CoopConnState::Listening && g_coopCompanion_[t] != NULL
+            && strcmp(g_coopCompanionName_[t], name) == 0) {
+            target = t;
+        }
+    }
+    bool keptForOther = g_coopCompanion != NULL && strcmp(g_coopCompanionName, "Companion") != 0 && strcmp(g_coopCompanionName, name) != 0;
+    if (target == -1 && keptForOther) {
+        for (int t = 0; t < kCoopMaxPeers && target == -1; t++) {
+            if (g_coopConnState_[t] == CoopConnState::Idle) {
+                target = t;
+            }
+        }
+    }
+    if (target == -1) {
+        if (g_coopCompanion != NULL && strcmp(g_coopCompanionName, name) == 0) {
+            coopnet_status(COOP_STATUS_INFO, "%s is back: seat %d.", name, here + 1);
+        }
+        debug_printf("\nCoop-party: %s takes seat %d\n", name, here + 1);
+        return;
+    }
+
+    g_coopPeerSocket_[target] = g_coopPeerSocket_[here];
+    memcpy(g_coopRecvBuffer_[target], g_coopRecvBuffer_[here], sizeof(g_coopRecvBuffer_[here]));
+    g_coopRecvBufferLen_[target] = g_coopRecvBufferLen_[here];
+    g_coopPeerClosed_[target] = g_coopPeerClosed_[here];
+    g_coopLastRecvTimeMs_[target] = g_coopLastRecvTimeMs_[here];
+    g_coopHostHelloStartMs_[target] = g_coopHostHelloStartMs_[here];
+    g_coopConnState_[target] = CoopConnState::WaitingForHello;
+
+    g_coopPeerSocket_[here] = COOP_INVALID_SOCKET;
+    g_coopRecvBufferLen_[here] = 0;
+    g_coopConnState_[here] = coopnet_host_free_seat_state();
+
+    g_coopPeerIdx = target;
+    if (keptForOther && strcmp(g_coopCompanionName_[target], name) != 0) {
+        coopnet_status(COOP_STATUS_INFO, "%s takes seat %d (seat %d is kept for %s).", name, target + 1, here + 1, g_coopCompanionName_[here]);
+    } else {
+        coopnet_status(COOP_STATUS_INFO, "%s is back: seat %d.", name, target + 1);
+    }
+    debug_printf("\nCoop-party: %s moved from seat %d to seat %d\n", name, here + 1, target + 1);
+}
+
+static void coopnet_poll_host_slot();
+
+static void coopnet_poll_host()
+{
+    CoopSlotScope scope;
+    coopnet_host_accept_connection();
+    for (int slot = 0; slot < kCoopMaxPeers; slot++) {
+        if (g_coopConnState_[slot] != CoopConnState::Idle) {
+            g_coopPeerIdx = slot;
+            coopnet_poll_host_slot();
+        }
+    }
+}
+
+// One friend slot's share of the host tick.
+static void coopnet_poll_host_slot()
+{
+    // A seat whose friend is still in the handshake has no character yet.
+    if (g_coopCompanion != NULL || g_coopPeerIdx == 0) {
+        coopnet_host_autosave_profile();
+        coopnet_protect_companion_item_scripts();
+        coopnet_host_check_map_transition();
+        coopnet_host_check_companion_death();
+        coopnet_host_inventory_watch();
+        coopnet_keep_companion_character();
     }
 
     if (g_coopConnState == CoopConnState::WaitingForHello) {
@@ -6098,7 +6523,7 @@ static void coopnet_poll_host()
                 g_coopPeerClosed ? "it closed" : "10s with no hello");
             coopnet_close_socket(g_coopPeerSocket);
             g_coopRecvBufferLen = 0;
-            g_coopConnState = CoopConnState::Listening;
+            g_coopConnState = coopnet_host_free_seat_state();
         } else if (gotMessage) {
             debug_printf("\nCoop: host received message type=%d len=%d while waiting for HELLO\n", type, payloadLen);
             if (type == COOP_MSG_HELLO && payloadLen >= sizeof(CoopHelloBase)) {
@@ -6121,9 +6546,12 @@ static void coopnet_poll_host()
                     coopnet_status(COOP_STATUS_BAD, "You both need the exact same fallout-ce.exe.");
                     coopnet_close_socket(g_coopPeerSocket);
                     g_coopRecvBufferLen = 0;
-                    g_coopConnState = CoopConnState::Listening;
+                    g_coopConnState = coopnet_host_free_seat_state();
                     return;
                 }
+
+                hello.characterName[sizeof(hello.characterName) - 1] = '\0';
+                coopnet_host_seat_by_name(hello.characterName);
 
                 {
                     char hostData[120];
@@ -6134,6 +6562,23 @@ static void coopnet_poll_host()
                         coopnet_status(COOP_STATUS_WARN, "  friend: %s", hello.dataText);
                     } else {
                         coopnet_stage("host: game data matches (%s)", hostData);
+                    }
+                }
+
+                // A friend taking a new seat gets its own character, next to the host.
+                if (g_coopCompanion == NULL && obj_dude != NULL) {
+                    coopnet_host_init_slot();
+                    if (g_coopCompanion == NULL) {
+                        CoopHelloAck refusal;
+                        memset(&refusal, 0, sizeof(refusal));
+                        refusal.accepted = 0;
+                        refusal.companionPid = -1;
+                        coopnet_send_message(g_coopPeerSocket, COOP_MSG_HELLO_ACK, &refusal, sizeof(refusal));
+                        coopnet_status(COOP_STATUS_BAD, "Refused friend %d: his character couldn't be created here.", g_coopPeerIdx + 1);
+                        coopnet_close_socket(g_coopPeerSocket);
+                        g_coopRecvBufferLen = 0;
+                        g_coopConnState = CoopConnState::Idle;
+                        return;
                     }
                 }
 
@@ -6176,8 +6621,8 @@ static void coopnet_poll_host()
                     coopnet_host_send_scenery_list();
                 }
 
-                coopnet_status(COOP_STATUS_GOOD, "Your friend connected!");
-                coopnet_stage("host: friend connected, sending the map");
+                coopnet_status(COOP_STATUS_GOOD, "A friend connected (seat %d of %d)!", g_coopPeerIdx + 1, kCoopMaxPeers);
+                coopnet_stage("host: friend connected (seat %d), sending the map", g_coopPeerIdx + 1);
                 // Joined in the middle of a fight: tell it so once its map has loaded.
                 g_coopHostCombatResendAtMs = coopnet_now_ms() + 4000;
             }
@@ -7143,6 +7588,15 @@ static void coopnet_apply_combat_participant(const CoopCombatParticipant& p)
     const int snapDistance = (g_coopClientInCombat || isInCombat()) ? kCoopSnapDistanceThreshold : 20;
     if ((p.pid == 0x1000000 || p.pid == kCoopCompanionPid)) {
         return; // the player prototype is the host character / companion, never a mirrored NPC
+    }
+    if (p.pid >= kCoopMirrorCompanionPid && p.pid < kCoopMirrorCompanionPid + kCoopMaxPeers) {
+        // Another friend's character: its prototype exists on no PC but the host.
+        coopnet_ensure_player_proto_copy(p.pid);
+        static int loggedMirrors = 0;
+        if (loggedMirrors < 20) {
+            loggedMirrors++;
+            debug_printf("\nCoop-friend: another friend's character (seat %d) at tile %d hp %d dead %d\n", p.pid - kCoopMirrorCompanionPid + 1, p.tile, p.hp, p.isDead);
+        }
     }
     if (!p.resync) {
         g_coopClientNeedsRepaint = true; // something moved/changed: see the periodic repaint in coopnet_poll_client()
@@ -8217,6 +8671,9 @@ static void coopnet_poll_client()
             hello.protocolVersion = kCoopProtocolVersion;
             strncpy(hello.mapName, map_data.name, sizeof(hello.mapName) - 1);
             hello.dataHash = coopnet_data_signature(hello.dataText, sizeof(hello.dataText));
+            if (obj_dude != NULL) {
+                snprintf(hello.characterName, sizeof(hello.characterName), "%s", critter_name(obj_dude));
+            }
             bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_HELLO, &hello, sizeof(hello));
             coopnet_stage("client: HELLO sent (protocol %u, game data: %s), success=%d", kCoopProtocolVersion, hello.dataText, sent);
             g_coopConnState = CoopConnState::WaitingForAck;
@@ -8735,6 +9192,18 @@ static void coopnet_poll_client()
                     }
                     coopnet_client_character_changed();
                 }
+            } else if (type == COOP_MSG_FRIEND_NAMES && payloadLen == sizeof(CoopFriendNames)) {
+                CoopFriendNames names;
+                memcpy(&names, payload, sizeof(names));
+                for (int slot = 0; slot < kCoopMaxPeers; slot++) {
+                    names.names[slot][sizeof(names.names[slot]) - 1] = '\0';
+                    if (strcmp(g_coopMirrorNames[slot], names.names[slot]) != 0) {
+                        snprintf(g_coopMirrorNames[slot], sizeof(g_coopMirrorNames[slot]), "%s", names.names[slot]);
+                        if (names.names[slot][0] != '\0') {
+                            debug_printf("\nCoop-friend: seat %d is %s\n", slot + 1, names.names[slot]);
+                        }
+                    }
+                }
             } else if (type == COOP_MSG_SETTINGS && payloadLen == sizeof(CoopSettings)) {
                 CoopSettings settings;
                 memcpy(&settings, payload, sizeof(settings));
@@ -8839,7 +9308,7 @@ static void coopnet_memory_mb(unsigned long long* workingSet, unsigned long long
 #endif
 }
 
-int coopnet_net_quality(int* rttMs)
+static int coopnet_net_quality_slot(int* rttMs)
 {
     *rttMs = -1;
     if (g_coopConnState != CoopConnState::Connected) {
@@ -8874,17 +9343,80 @@ int coopnet_net_quality(int* rttMs)
     return 3;
 }
 
-void coopnet_keepalive()
+// Host, F9 screen: the line for one seat ("Seat 2: Max Stone - connected, ping
+// 40 ms"). False for a seat nobody uses (counted as free).
+static bool coopnet_host_seat_line(int slot, char* out, size_t outSize, int* color, int good, int warn, int dim)
 {
+    CoopSlotScope scope;
+    g_coopPeerIdx = slot;
+    const char* name = g_coopCompanion != NULL ? g_coopCompanionName : "(new friend)";
+    switch (g_coopConnState) {
+    case CoopConnState::Connected: {
+        int rtt;
+        int quality = coopnet_net_quality_slot(&rtt);
+        static const char* const kQuality[] = { "good", "ok", "poor", "no answer", "busy loading" };
+        if (quality >= 0 && quality <= 4 && rtt >= 0) {
+            snprintf(out, outSize, "Seat %d: %s - connected, ping %d ms (%s)", slot + 1, name, rtt, kQuality[quality]);
+        } else if (quality >= 0 && quality <= 4) {
+            snprintf(out, outSize, "Seat %d: %s - connected (%s)", slot + 1, name, kQuality[quality]);
+        } else {
+            snprintf(out, outSize, "Seat %d: %s - connected", slot + 1, name);
+        }
+        *color = quality >= 2 && quality != 4 ? warn : good;
+        return true;
+    }
+    case CoopConnState::WaitingForHello:
+        snprintf(out, outSize, "Seat %d: someone is joining...", slot + 1);
+        *color = warn;
+        return true;
+    case CoopConnState::Listening:
+        if (slot == 0 && strcmp(g_coopCompanionName, "Companion") == 0) {
+            return false; // the first seat, never taken yet: just free
+        }
+        snprintf(out, outSize, "Seat %d: kept for %s (left - can rejoin)", slot + 1, name);
+        *color = dim;
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Host: the worst of the friends' connections (what is worth noticing).
+int coopnet_net_quality(int* rttMs)
+{
+    if (g_coopRole != CoopRole::Host) {
+        return coopnet_net_quality_slot(rttMs);
+    }
+    // How bad each answer is: measuring < good < ok < poor < busy < gone.
+    static const int kBadness[] = { 1, 2, 3, 5, 4 };
+    CoopSlotScope scope;
+    int worst = -1;
+    int worstRtt = -1;
+    int worstBadness = -1;
+    for (int slot = 0; slot < kCoopMaxPeers; slot++) {
+        g_coopPeerIdx = slot;
+        int rtt;
+        int quality = coopnet_net_quality_slot(&rtt);
+        if (quality == -1) {
+            continue;
+        }
+        int badness = quality == -2 ? 0 : kBadness[quality];
+        if (badness > worstBadness) {
+            worstBadness = badness;
+            worst = quality;
+            worstRtt = rtt;
+        }
+    }
+    *rttMs = worstRtt;
+    return worst;
+}
+
+static void coopnet_keepalive_peer(uint32_t now)
+{
+    COOP_EACH_PEER(coopnet_keepalive_peer(now));
     if (g_coopConnState != CoopConnState::Connected || g_coopPeerSocket == COOP_INVALID_SOCKET) {
         return;
     }
-    static uint32_t lastRun = 0;
-    uint32_t now = coopnet_now_ms();
-    if (now - lastRun < 100) {
-        return;
-    }
-    lastRun = now;
 
     // take in what has arrived (it stays in the same buffer the normal reader uses)
     int space = static_cast<int>(sizeof(g_coopRecvBuffer)) - g_coopRecvBufferLen;
@@ -8934,10 +9466,31 @@ void coopnet_keepalive()
     }
 }
 
-static void coopnet_net_stats_tick()
+void coopnet_keepalive()
 {
-    static uint32_t lastPollMs = 0;
-    static uint32_t lastLogMs = 0;
+    static uint32_t lastRun = 0;
+    uint32_t now = coopnet_now_ms();
+    if (now - lastRun < 100) {
+        return;
+    }
+    lastRun = now;
+    coopnet_keepalive_peer(now);
+}
+
+// The frame rate over the last 5 s, measured once for every seat's line.
+static int g_coopStatsFps = 0;
+
+// One seat's share (the slot being handled): its ping, its scenery changes and
+// its own 5-second log line. It used to run only for the slot that happened to
+// be selected -- the first friend's, nearly always -- so the other friends got
+// no scenery changes, and their counts piled up until a combat turn selected
+// their slot and printed minutes of traffic as one "5s window".
+static void coopnet_net_stats_tick_slot(uint32_t now)
+{
+    static uint32_t lastPollMs_[kCoopMaxPeers] = COOP_PER_PEER(0); // per friend
+    static uint32_t lastLogMs_[kCoopMaxPeers] = COOP_PER_PEER(0);
+    uint32_t& lastPollMs = lastPollMs_[g_coopPeerIdx];
+    uint32_t& lastLogMs = lastLogMs_[g_coopPeerIdx];
 
     if (g_coopConnState != CoopConnState::Connected) {
         lastPollMs = 0;
@@ -8950,7 +9503,6 @@ static void coopnet_net_stats_tick()
         return;
     }
 
-    uint32_t now = coopnet_now_ms();
     if (now - g_coopLastPingMs >= 1000) {
         g_coopLastPingMs = now;
         coopnet_send_droppable(g_coopPeerSocket, COOP_MSG_PING, &now, 4);
@@ -8997,13 +9549,37 @@ static void coopnet_net_stats_tick()
     unsigned long long memWorking = 0;
     unsigned long long memPrivate = 0;
     coopnet_memory_mb(&memWorking, &memPrivate);
-    debug_printf("\nCoop-net: %us window: %d fps, ping %d ms; memory %llu MB (private %llu MB); sent %u msgs / %u B (dropped %u, failed %u, blocked %u ms), recv %u msgs / %u B, max recv gap %u ms, max poll gap %u ms, backlog %d B; top sent types [%s] recv types [%s]\n",
-        (unsigned)((now - lastLogMs) / 1000), svga_frames_presented_and_reset(now - lastLogMs), static_cast<int>(g_coopRttMs), memWorking, memPrivate,
+    debug_printf("\nCoop-net: seat %d, %us window: %d fps, ping %d ms; memory %llu MB (private %llu MB); sent %u msgs / %u B (dropped %u, failed %u, blocked %u ms), recv %u msgs / %u B, max recv gap %u ms, max poll gap %u ms, backlog %d B; top sent types [%s] recv types [%s]\n",
+        g_coopPeerIdx + 1, (unsigned)((now - lastLogMs) / 1000), g_coopStatsFps, static_cast<int>(g_coopRttMs), memWorking, memPrivate,
         g_coopNetStats.sentMsgs, g_coopNetStats.sentBytes, g_coopNetStats.dropped, g_coopNetStats.failed, g_coopNetStats.blockedMs,
         g_coopNetStats.recvMsgs, g_coopNetStats.recvBytes, g_coopNetStats.maxRecvGapMs, g_coopNetStats.maxPollGapMs,
         g_coopRecvBufferLen, sentTop, recvTop);
     memset(&g_coopNetStats, 0, sizeof(g_coopNetStats));
     lastLogMs = now;
+}
+
+static void coopnet_net_stats_tick()
+{
+    uint32_t now = coopnet_now_ms();
+    static uint32_t lastFpsMs = 0;
+    if (lastFpsMs == 0) {
+        lastFpsMs = now;
+    } else if (now - lastFpsMs >= 5000) {
+        g_coopStatsFps = svga_frames_presented_and_reset(now - lastFpsMs);
+        lastFpsMs = now;
+    }
+
+    if (g_coopRole != CoopRole::Host) {
+        coopnet_net_stats_tick_slot(now);
+        return;
+    }
+    CoopSlotScope scope;
+    for (int slot = 0; slot < kCoopMaxPeers; slot++) {
+        if (g_coopConnState_[slot] != CoopConnState::Idle) {
+            g_coopPeerIdx = slot;
+            coopnet_net_stats_tick_slot(now);
+        }
+    }
 }
 
 void coopnet_poll()
@@ -9035,6 +9611,10 @@ void coopnet_poll()
 // phase 2) -- attacks are a later phase.
 void coopnet_combat_input(Object* companion)
 {
+    CoopSlotScope scope;
+    if (g_coopRole == CoopRole::Host && !coopnet_select_slot_of(companion)) {
+        return;
+    }
     if (g_coopRole != CoopRole::Host) {
         // Confirmed via testing: this must never run on the client. NPCs
         // run independently/unsynced on each side (see the general
@@ -9049,7 +9629,7 @@ void coopnet_combat_input(Object* companion)
         return;
     }
 
-    if (!coopnet_is_connected()) {
+    if (!(g_coopConnState == CoopConnState::Connected)) {
         return;
     }
 
@@ -9101,7 +9681,7 @@ void coopnet_combat_input(Object* companion)
         if (g_coopHostCombatEndTurnRequested && (!companionBusy || busyTooLong)) {
             break;
         }
-        if (!coopnet_is_connected()) {
+        if (!(g_coopConnState == CoopConnState::Connected)) {
             break;
         }
         if (game_user_wants_to_quit != 0) {
@@ -9122,7 +9702,7 @@ void coopnet_combat_input(Object* companion)
     g_coopHostCombatTurnActive = false;
     g_coopHostPendingCombatActionValid = false;
 
-    if (coopnet_is_connected()) {
+    if ((g_coopConnState == CoopConnState::Connected)) {
         CoopCombatTurn endTurn;
         endTurn.actionPoints = 0;
         coopnet_send_message(g_coopPeerSocket, COOP_MSG_COMBAT_TURN, &endTurn, sizeof(endTurn));
@@ -9320,6 +9900,7 @@ bool coopnet_client_forward_item_use(Object* user, Object* item, Object* target)
 
 void coopnet_notify_screen_sfx(const char* soundName)
 {
+    COOP_EACH_PEER(coopnet_notify_screen_sfx(soundName));
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected || !g_coopRemoteHostActive || soundName == NULL) {
         return;
     }
@@ -9344,6 +9925,7 @@ void coopnet_end_attack_sfx()
 
 void coopnet_notify_attack_sfx(Object* owner, const char* soundName, int delay)
 {
+    COOP_EACH_PEER(coopnet_notify_attack_sfx(owner, soundName, delay));
     // An attack's own sounds, and anything else the two characters do that makes
     // a sound (climbing a ladder, drawing a weapon, picking something up): the
     // client replays the movements but not their sound.
@@ -9380,6 +9962,10 @@ void coopnet_on_client_loot_click(Object* critter)
 // companion's inventory (obj_dude and inven_dude swapped, like client barter).
 static bool coopnet_host_run_companion_screen(Object* looter, Object* container, bool steal)
 {
+    CoopSlotScope scope;
+    if (!coopnet_select_slot_of(looter)) {
+        return false;
+    }
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected || looter != g_coopCompanion || looter == NULL) {
         return false;
     }
@@ -9422,8 +10008,10 @@ struct CoopProfileFile {
     CritterBodyEffects effects; // version 3: radiation, poison and their timers
 };
 
-static bool g_coopHostProfileValid = false;
-static CoopProfileFile g_coopHostProfile;
+static bool g_coopHostProfileValid_[kCoopMaxPeers] = COOP_PER_PEER(false);
+#define g_coopHostProfileValid g_coopHostProfileValid_[g_coopPeerIdx]
+static CoopProfileFile g_coopHostProfile_[kCoopMaxPeers];
+#define g_coopHostProfile g_coopHostProfile_[g_coopPeerIdx]
 
 // Called by loadsave.cc after a save was loaded (both roles). The load frees
 // every object, so the companion pointer and every mirror-table entry dangle:
@@ -9431,6 +10019,7 @@ static CoopProfileFile g_coopHostProfile;
 // change. Reset them and ask for / do a fresh sync.
 void coopnet_host_notify_xp(int xp)
 {
+    COOP_EACH_PEER(coopnet_host_notify_xp(xp));
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected || xp == 0) {
         return;
     }
@@ -9452,9 +10041,11 @@ void coopnet_on_character_screen_closed()
 void coopnet_on_game_reset()
 {
     coopnet_remote_client_abort();
-    if (g_coopCompanion != NULL) {
-        coopnet_destroy_companion(g_coopCompanion);
-        g_coopCompanion = NULL;
+    for (int slot = 0; slot < kCoopMaxPeers; slot++) {
+        if (g_coopCompanion_[slot] != NULL) {
+            coopnet_destroy_companion(g_coopCompanion_[slot]);
+            g_coopCompanion_[slot] = NULL;
+        }
     }
 
     // Everything mirrored from the old world goes with it.
@@ -9512,17 +10103,48 @@ void coopnet_on_game_loaded()
             coopnet_client_send_character();
         }
     } else if (g_coopRole == CoopRole::Host) {
-        coopnet_destroy_companion(g_coopCompanion);
-        g_coopCompanion = NULL;
-        coopnet_host_reset_world_shadow();
-        g_coopCompanion = coopnet_find_or_spawn_companion(obj_dude->pid, obj_dude->tile, obj_dude->elevation);
-        coopnet_host_apply_saved_profile();
-        coopnet_host_push_character_record();
-        g_coopHostLastMapName[0] = '\0'; // makes the next tick send the client a MAP_TRANSITION
+        CoopSlotScope scope;
+        for (int slot = 0; slot < kCoopMaxPeers; slot++) {
+            g_coopPeerIdx = slot;
+            if (g_coopConnState == CoopConnState::Idle) {
+                continue;
+            }
+            // The load's game reset already erased every companion (coopnet_on_game_reset()), so
+            // "has a character" is the seat being in use, not the pointer.
+            bool hadCharacter = g_coopCompanion != NULL || slot == 0
+                || g_coopConnState == CoopConnState::Connected || g_coopConnState == CoopConnState::Listening;
+            coopnet_destroy_companion(g_coopCompanion);
+            g_coopCompanion = NULL;
+            g_coopCompanionGameOverSent = false;
+            coopnet_host_reset_world_shadow();
+            if (hadCharacter) {
+                g_coopCompanion = coopnet_find_or_spawn_companion(obj_dude->pid, obj_dude->tile, obj_dude->elevation);
+                coopnet_host_apply_saved_profile();
+                coopnet_host_push_character_record();
+            }
+            g_coopHostLastMapName[0] = '\0'; // makes the next tick send the client a MAP_TRANSITION
+        }
     }
 }
 
-void coopnet_host_save_profile(const char* path)
+// The file of the slot being handled: the first friend's is `path` itself (the
+// one older versions wrote), the others get the seat number before ".DAT".
+static void coopnet_slot_profile_path(const char* path, char* out, size_t outSize)
+{
+    snprintf(out, outSize, "%s", path);
+    if (g_coopPeerIdx == 0) {
+        return;
+    }
+    char* dot = strrchr(out, '.');
+    if (dot == NULL) {
+        return;
+    }
+    char ext[16];
+    snprintf(ext, sizeof(ext), "%s", dot);
+    snprintf(dot, outSize - (dot - out), "%d%s", g_coopPeerIdx + 1, ext);
+}
+
+static void coopnet_host_save_profile_slot(const char* path)
 {
     CoopProfileFile file;
     memset(&file, 0, sizeof(file));
@@ -9564,6 +10186,17 @@ void coopnet_host_save_profile(const char* path)
 }
 
 // Read one profile file; true (and g_coopHostProfile set) if it holds a character.
+void coopnet_host_save_profile(const char* path)
+{
+    CoopSlotScope scope;
+    for (int slot = 0; slot < kCoopMaxPeers; slot++) {
+        g_coopPeerIdx = slot;
+        char slotPath[96];
+        coopnet_slot_profile_path(path, slotPath, sizeof(slotPath));
+        coopnet_host_save_profile_slot(slotPath);
+    }
+}
+
 static bool coopnet_host_read_profile(const char* path)
 {
     DB_FILE* stream = db_fopen(path, "rb");
@@ -9599,7 +10232,7 @@ static bool coopnet_host_read_profile(const char* path)
 // save rolls the client back with the host, like single player).
 static const char* const kCoopAutosavePath = "SAVEGAME\\COOP_AUTO.DAT";
 
-void coopnet_host_load_profile(const char* path)
+static void coopnet_host_load_profile_slot(const char* path)
 {
     g_coopHostProfileValid = false;
     // A save without a record of the client's character starts with none --
@@ -9609,6 +10242,17 @@ void coopnet_host_load_profile(const char* path)
     // older save (or one made before the mod) handed the client everything it had looted
     // since -- looting the same things again and again (confirmed via testing).
     coopnet_host_read_profile(path);
+}
+
+void coopnet_host_load_profile(const char* path)
+{
+    CoopSlotScope scope;
+    for (int slot = 0; slot < kCoopMaxPeers; slot++) {
+        g_coopPeerIdx = slot;
+        char slotPath[96];
+        coopnet_slot_profile_path(path, slotPath, sizeof(slotPath));
+        coopnet_host_load_profile_slot(slotPath);
+    }
 }
 
 // Host, every poll tick.
@@ -9622,7 +10266,9 @@ static void coopnet_host_autosave_profile()
         return;
     }
     g_coopLastProfileAutosaveMs = now;
-    coopnet_host_save_profile(kCoopAutosavePath);
+    char slotPath[96];
+    coopnet_slot_profile_path(kCoopAutosavePath, slotPath, sizeof(slotPath));
+    coopnet_host_save_profile_slot(slotPath);
 }
 
 // Called when hosting starts (the companion has just been created).
@@ -9694,6 +10340,7 @@ void coopnet_on_client_skill_use(int skill, Object* target)
 
 void coopnet_notify_item_dropped(Object* critter, Object* item)
 {
+    COOP_EACH_PEER(coopnet_notify_item_dropped(critter, item));
     if (g_coopConnState != CoopConnState::Connected) {
         return;
     }
@@ -9713,6 +10360,7 @@ void coopnet_notify_item_dropped(Object* critter, Object* item)
 
 void coopnet_notify_item_picked_up(Object* critter, Object* item)
 {
+    COOP_EACH_PEER(coopnet_notify_item_picked_up(critter, item));
     if (g_coopConnState != CoopConnState::Connected) {
         return;
     }
@@ -9744,6 +10392,7 @@ void coopnet_notify_item_picked_up(Object* critter, Object* item)
 
 void coopnet_notify_combat_begin()
 {
+    COOP_EACH_PEER(coopnet_notify_combat_begin());
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected) {
         return;
     }
@@ -9754,6 +10403,7 @@ void coopnet_notify_combat_begin()
 
 void coopnet_notify_combat_end()
 {
+    COOP_EACH_PEER(coopnet_notify_combat_end());
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected) {
         return;
     }
@@ -9800,6 +10450,7 @@ void coopnet_end_capture_combat_text()
 // does real work during the narrow combat_display() window above.
 void coopnet_capture_display_print(const char* text)
 {
+    COOP_EACH_PEER(coopnet_capture_display_print(text));
     if (!g_coopCapturingCombatText) {
         return;
     }
@@ -9869,6 +10520,7 @@ static int32_t coopnet_resolve_anim_id(Object* obj, bool anyCritter = false)
 // whenever the attacker is the companion or obj_dude.
 void coopnet_notify_attack_anim(Object* attacker, int anim, Object* defender)
 {
+    COOP_EACH_PEER(coopnet_notify_attack_anim(attacker, anim, defender));
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected) {
         return;
     }
@@ -9895,6 +10547,7 @@ void coopnet_notify_attack_anim(Object* attacker, int anim, Object* defender)
 // obj is the companion or obj_dude.
 void coopnet_notify_object_anim(Object* obj, int anim)
 {
+    COOP_EACH_PEER(coopnet_notify_object_anim(obj, anim));
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected) {
         return;
     }
@@ -9919,6 +10572,7 @@ void coopnet_notify_object_anim(Object* obj, int anim)
 // No-op unless obj is the companion or obj_dude.
 void coopnet_notify_move(Object* obj, int tile, int elevation, bool run, int actionPoints)
 {
+    COOP_EACH_PEER(coopnet_notify_move(obj, tile, elevation, run, actionPoints));
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected) {
         return;
     }
@@ -9944,6 +10598,7 @@ void coopnet_notify_move(Object* obj, int tile, int elevation, bool run, int act
 
 void coopnet_notify_move_to_object(Object* obj, Object* destination, bool run, int actionPoints)
 {
+    COOP_EACH_PEER(coopnet_notify_move_to_object(obj, destination, run, actionPoints));
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected || destination == NULL) {
         return;
     }
@@ -9979,6 +10634,7 @@ void coopnet_notify_move_to_object(Object* obj, Object* destination, bool run, i
 // interactions are host-driven-and-relevant here).
 void coopnet_notify_scenery_state(Object* scenery, bool isOpen)
 {
+    COOP_EACH_PEER(coopnet_notify_scenery_state(scenery, isOpen));
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected) {
         return;
     }
@@ -10006,6 +10662,7 @@ void coopnet_notify_scenery_state(Object* scenery, bool isOpen)
 // `defender` on the receiving end when it can't be resolved.
 void coopnet_notify_damage_anim(Object* defender, int damage, int flags, bool hitFromFront, int knockbackDistance, int knockbackRotation, int anim, Object* attacker, int delay, Object* weapon)
 {
+    COOP_EACH_PEER(coopnet_notify_damage_anim(defender, damage, flags, hitFromFront, knockbackDistance, knockbackRotation, anim, attacker, delay, weapon));
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected) {
         return;
     }
@@ -10079,6 +10736,7 @@ bool coopnet_client_blocks_local_float_text()
 // function every floating message goes through.
 void coopnet_notify_float_text(Object* obj, const char* text, int font, int color, int a5)
 {
+    COOP_EACH_PEER(coopnet_notify_float_text(obj, text, font, color, a5));
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected || obj == NULL || text == NULL || text[0] == '\0') {
         return;
     }
@@ -10191,8 +10849,12 @@ static void coopnet_host_apply_dialogue_start(const CoopItemEvent& evt)
     }
 }
 
-void coopnet_note_companion_reached_npc()
+void coopnet_note_companion_reached_npc(Object* companion)
 {
+    CoopSlotScope scope;
+    if (!coopnet_select_slot_of(companion)) {
+        return;
+    }
     g_coopDialogueDriverPending = true;
     g_coopDialogueDriverPendingMs = coopnet_now_ms();
 }
@@ -10213,6 +10875,7 @@ void coopnet_mark_dialogue_host_initiated()
 // was the one who walked up to the NPC -- confirmed via testing.
 void coopnet_mark_dialogue_client_initiated(Object* npc)
 {
+    COOP_EACH_PEER(coopnet_mark_dialogue_client_initiated(npc));
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected
         || g_coopCompanion == NULL || npc == NULL) {
         return;
@@ -10235,13 +10898,41 @@ void coopnet_mark_dialogue_client_initiated(Object* npc)
 // True while a conversation is (about to be) driven by the client -- used by
 // gdialog.cc (skip the host-position "can you see them" check, ignore the
 // host's own input) and by op_dude_obj() (the speaker is the companion).
-bool coopnet_dialogue_driven_by_client()
+static bool coopnet_slot_drives_dialogue()
 {
     if (g_coopDialogueDrivenByClient) {
         return true;
     }
     return g_coopDialogueDriverPending
         && coopnet_now_ms() - g_coopDialogueDriverPendingMs < kCoopDialogueDriverPendingTimeoutMs;
+}
+
+// The slot of the friend driving the conversation, or -1.
+static int coopnet_dialogue_driver_slot()
+{
+    CoopSlotScope scope;
+    int slots = g_coopRole == CoopRole::Host ? kCoopMaxPeers : 1;
+    for (int slot = 0; slot < slots; slot++) {
+        g_coopPeerIdx = slot;
+        if (coopnet_slot_drives_dialogue()) {
+            return slot;
+        }
+    }
+    return -1;
+}
+
+bool coopnet_dialogue_driven_by_client()
+{
+    return coopnet_dialogue_driver_slot() != -1;
+}
+
+Object* coopnet_dialogue_driver_companion()
+{
+    if (g_coopRole != CoopRole::Host) {
+        return NULL;
+    }
+    int slot = coopnet_dialogue_driver_slot();
+    return slot != -1 ? g_coopCompanion_[slot] : NULL;
 }
 
 // Host-side, called from gDialogProcess()'s loop with the key it just read
@@ -10251,6 +10942,12 @@ bool coopnet_dialogue_driven_by_client()
 // N". Quit keys still get through.
 int coopnet_dialogue_filter_input(int keyCode)
 {
+    CoopSlotScope scope;
+    int driver = coopnet_dialogue_driver_slot();
+    if (driver == -1) {
+        return keyCode;
+    }
+    g_coopPeerIdx = driver;
     if (!g_coopDialogueDrivenByClient) {
         return keyCode;
     }
@@ -10259,6 +10956,10 @@ int coopnet_dialogue_filter_input(int keyCode)
         int pick = g_coopPendingDialoguePick;
         g_coopPendingDialoguePick = -1;
         return 49 + pick;
+    }
+    if (g_coopPendingDialoguePick == -4) {
+        g_coopPendingDialoguePick = -1;
+        return COOP_DIALOGUE_LEAVE_KEY;
     }
     if (g_coopPendingDialoguePick == -2 || g_coopPendingDialoguePick == -3) {
         // Driver commands: the same keys the loop already maps to the
@@ -10297,6 +10998,13 @@ bool coopnet_on_client_dialogue_key(int keyCode)
     if (g_coopRole != CoopRole::Client || g_coopConnState != CoopConnState::Connected || !g_coopClientDrivesDialogue) {
         return false;
     }
+    if (keyCode == KEY_ESCAPE) {
+        // Leave the conversation (the host's loop ends it, see COOP_DIALOGUE_LEAVE_KEY).
+        int32_t leave = -4;
+        coopnet_send_message(g_coopPeerSocket, COOP_MSG_DIALOGUE_PICK, &leave, sizeof(leave));
+        debug_printf("\nCoop: sent dialogue leave (Escape)\n");
+        return true;
+    }
     if (keyCode < 49 || keyCode > 57) {
         return false;
     }
@@ -10309,18 +11017,19 @@ bool coopnet_on_client_dialogue_key(int keyCode)
 
 void coopnet_notify_dialogue_begin()
 {
+    COOP_EACH_PEER(coopnet_notify_dialogue_begin());
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected) {
         return;
     }
 
     // Promote a queued client request to "this conversation is client-driven".
-    g_coopDialogueDrivenByClient = coopnet_dialogue_driven_by_client();
+    g_coopDialogueDrivenByClient = coopnet_slot_drives_dialogue();
     g_coopDialogueDriverPending = false;
     g_coopDialogueHostInitiated = false;
     g_coopPendingDialoguePick = -1;
 
     bool sent = coopnet_send_message(g_coopPeerSocket, COOP_MSG_DIALOGUE_BEGIN, NULL, 0);
-    debug_printf("\nCoop: notified peer dialogue began (driver=%s), success=%d\n", g_coopDialogueDrivenByClient ? "client" : "host", sent);
+    debug_printf("\nCoop: notified peer dialogue began (driver=%s, seat %d), success=%d\n", g_coopDialogueDrivenByClient ? "client" : "host", g_coopPeerIdx + 1, sent);
 
     uint8_t driverIsClient = g_coopDialogueDrivenByClient ? 1 : 0;
     coopnet_send_message(g_coopPeerSocket, COOP_MSG_DIALOGUE_DRIVER, &driverIsClient, sizeof(driverIsClient));
@@ -10328,6 +11037,7 @@ void coopnet_notify_dialogue_begin()
 
 void coopnet_notify_dialogue_end()
 {
+    COOP_EACH_PEER(coopnet_notify_dialogue_end());
     if (g_coopDialogueDrivenByClient) {
         g_coopTravelAfterClientDialogueMs = coopnet_now_ms();
     }
@@ -10348,6 +11058,7 @@ void coopnet_notify_dialogue_state(int replyListId, int replyMsgId, const char* 
     const int* optionListIds, const int* optionMsgIds, const int* optionReactions,
     const char* const* optionTexts, int optionCount)
 {
+    COOP_EACH_PEER(coopnet_notify_dialogue_state(replyListId, replyMsgId, replyText, optionListIds, optionMsgIds, optionReactions, optionTexts, optionCount));
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected) {
         return;
     }
@@ -10379,6 +11090,7 @@ void coopnet_notify_dialogue_state(int replyListId, int replyMsgId, const char* 
 
 void coopnet_notify_dialogue_visual_begin(int headFid, int reaction)
 {
+    COOP_EACH_PEER(coopnet_notify_dialogue_visual_begin(headFid, reaction));
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected) {
         return;
     }
@@ -10396,6 +11108,7 @@ void coopnet_notify_dialogue_visual_begin(int headFid, int reaction)
 
 void coopnet_notify_head_frame(int fid, int frame)
 {
+    COOP_EACH_PEER(coopnet_notify_head_frame(fid, frame));
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected || fid == -1) {
         return;
     }
@@ -10408,6 +11121,7 @@ void coopnet_notify_head_frame(int fid, int frame)
 
 void coopnet_notify_object_anim(Object* obj, int anim, int faceTile)
 {
+    COOP_EACH_PEER(coopnet_notify_object_anim(obj, anim, faceTile));
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected) {
         return;
     }
@@ -10426,6 +11140,7 @@ void coopnet_notify_object_anim(Object* obj, int anim, int faceTile)
 
 void coopnet_notify_dialogue_visual_end()
 {
+    COOP_EACH_PEER(coopnet_notify_dialogue_visual_end());
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected) {
         return;
     }
@@ -10441,11 +11156,14 @@ void coopnet_notify_dialogue_visual_end()
 // diff against gdialog.cc's own snapshot. Reset to "definitely different"
 // by coopnet_notify_worldmap_begin() so the very first state of a session
 // always goes out.
-static int g_coopLastSentWorldmapTerrain = -1;
-static bool g_coopLastSentWorldmapIsMoving = false;
+static int g_coopLastSentWorldmapTerrain_[kCoopMaxPeers] = COOP_PER_PEER(-1);
+#define g_coopLastSentWorldmapTerrain g_coopLastSentWorldmapTerrain_[g_coopPeerIdx]
+static bool g_coopLastSentWorldmapIsMoving_[kCoopMaxPeers] = COOP_PER_PEER(false);
+#define g_coopLastSentWorldmapIsMoving g_coopLastSentWorldmapIsMoving_[g_coopPeerIdx]
 
 void coopnet_notify_worldmap_begin()
 {
+    COOP_EACH_PEER(coopnet_notify_worldmap_begin());
     g_coopLastSentWorldmapTerrain = -1;
     g_coopLastSentWorldmapIsMoving = false;
 
@@ -10461,6 +11179,7 @@ void coopnet_notify_worldmap_begin()
 
 void coopnet_notify_worldmap_end()
 {
+    COOP_EACH_PEER(coopnet_notify_worldmap_end());
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected || g_coopRemoteHostActive) {
         return;
     }
@@ -10471,6 +11190,7 @@ void coopnet_notify_worldmap_end()
 
 void coopnet_notify_worldmap_state(int terrain, bool isMoving)
 {
+    COOP_EACH_PEER(coopnet_notify_worldmap_state(terrain, isMoving));
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected || g_coopRemoteHostActive) {
         return;
     }
@@ -10491,6 +11211,7 @@ void coopnet_notify_worldmap_state(int terrain, bool isMoving)
 
 void coopnet_notify_game_over(uint8_t reason)
 {
+    COOP_EACH_PEER(coopnet_notify_game_over(reason));
     if (g_coopRole != CoopRole::Host || g_coopConnState != CoopConnState::Connected) {
         return;
     }
@@ -10697,6 +11418,16 @@ void coopnet_open_menu()
 
     coopnet_sockets_init();
     CoopTextInputScope textInput;
+
+    if (g_coopRole == CoopRole::Host) {
+        for (int slot = 0; slot < kCoopMaxPeers; slot++) {
+            char line[160];
+            int color = 0;
+            if (coopnet_host_seat_line(slot, line, sizeof(line), &color, 0, 0, 0)) {
+                debug_printf("\nCoop-seats: %s\n", line);
+            }
+        }
+    }
 
     const int W = 580;
     const int H = 420;
@@ -10973,11 +11704,19 @@ void coopnet_open_menu()
                     coopnet_menu_push_line(header, "   J  -  join a friend's game", colGreen);
                 } else if (mode == COOP_MENU_HOST) {
                     char line[160];
-                    if (connected) {
-                        coopnet_menu_push_line(header, "Status: your friend is CONNECTED", colGreen);
-                    } else if (g_coopRole == CoopRole::Host) {
-                        snprintf(line, sizeof(line), "Status: waiting for your friend (port %d)", kCoopDefaultPort);
-                        coopnet_menu_push_line(header, line, colYellow);
+                    if (g_coopRole == CoopRole::Host) {
+                        // One line per seat in use: who, and how their connection is.
+                        int freeSeats = 0;
+                        for (int slot = 0; slot < kCoopMaxPeers; slot++) {
+                            int color = colWhite;
+                            if (!coopnet_host_seat_line(slot, line, sizeof(line), &color, colGreen, colYellow, colDim)) {
+                                freeSeats++;
+                                continue;
+                            }
+                            coopnet_menu_push_line(header, line, color);
+                        }
+                        snprintf(line, sizeof(line), "Free seats: %d of %d (port %d)", freeSeats, kCoopMaxPeers, kCoopDefaultPort);
+                        coopnet_menu_push_line(header, line, freeSeats > 0 ? colYellow : colDim);
                     } else {
                         coopnet_menu_push_line(header, "Status: not hosting", colDim);
                     }

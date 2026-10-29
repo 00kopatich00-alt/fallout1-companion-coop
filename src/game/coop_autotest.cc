@@ -365,7 +365,7 @@ Object* explore_find_enemy()
     Object* best = NULL;
     int bestDistance = 1 << 30;
     for (Object* o = obj_find_first_at(map_elevation); o != NULL; o = obj_find_next_at()) {
-        if (FID_TYPE(o->fid) != OBJ_TYPE_CRITTER || o == obj_dude || o == coopnet_get_companion() || o->tile == -1
+        if (FID_TYPE(o->fid) != OBJ_TYPE_CRITTER || o == obj_dude || coopnet_is_companion(o) || o->tile == -1
             || (o->flags & OBJECT_HIDDEN) != 0 || critter_is_dead(o) || o->data.critter.combat.team == obj_dude->data.critter.combat.team) {
             continue;
         }
@@ -607,6 +607,18 @@ void explore_finish()
     check_passed("explore finished");
 }
 
+// "dude", "companion" (friend 1's character) or "companionN" (friend N's, on the host).
+static Object* autotest_target(const std::string& name)
+{
+    if (name == "dude") {
+        return obj_dude;
+    }
+    if (name.size() > 9 && name.compare(0, 9, "companion") == 0) {
+        return coopnet_get_companion_slot(atoi(name.c_str() + 9) - 1);
+    }
+    return coopnet_get_companion();
+}
+
 void execute_line(const std::string& rawLine, uint32_t now)
 {
     std::string line = rawLine;
@@ -686,6 +698,11 @@ void execute_line(const std::string& rawLine, uint32_t now)
         } else {
             check_failed("expect '" + text + "' (not in the log)");
         }
+    } else if (cmd == "mark") {
+        // The next wait_for only counts lines written from here on (e.g. a SECOND map load).
+        g_actionMark = log_position();
+        g_haveActionMark = true;
+        check_passed("mark");
     } else if (cmd == "expect_not") {
         std::string text = rest_of_line(line, 1);
         if (!log_contains_since(text, 0)) {
@@ -708,6 +725,10 @@ void execute_line(const std::string& rawLine, uint32_t now)
         g_haveActionMark = true;
         coopnet_shutdown();
         check_passed("coop_drop");
+    } else if (cmd == "name" && w.size() >= 2) {
+        // Renames this PC's character (friends loading the same save need different names).
+        critter_pc_set_name(w[1].c_str());
+        check_passed("name " + w[1]);
     } else if (cmd == "coop_join" && w.size() >= 2) {
         // A later wait_for must see only what this join causes, not an earlier session's lines.
         g_actionMark = log_position();
@@ -837,7 +858,7 @@ void execute_line(const std::string& rawLine, uint32_t now)
         Object* best = NULL;
         int bestDistance = 1 << 30;
         for (Object* o = obj_find_first_at(map_elevation); o != NULL; o = obj_find_next_at()) {
-            if (FID_TYPE(o->fid) != OBJ_TYPE_CRITTER || o == obj_dude || o == coopnet_get_companion() || o->tile == -1
+            if (FID_TYPE(o->fid) != OBJ_TYPE_CRITTER || o == obj_dude || coopnet_is_companion(o) || o->tile == -1
                 || (o->flags & OBJECT_HIDDEN) != 0 || critter_is_dead(o) || o->data.critter.combat.team == obj_dude->data.critter.combat.team) {
                 continue;
             }
@@ -890,20 +911,36 @@ void execute_line(const std::string& rawLine, uint32_t now)
             if (FID_TYPE(o->fid) != OBJ_TYPE_MISC || o->pid < 0x5000010 || o->pid > 0x5000017 || o->tile == -1) {
                 continue;
             }
+            // "goto_exit world": only an exit out to the world map (destination map -1).
+            if (w.size() >= 2 && w[1] == "world" && o->data.misc.map != -1) {
+                continue;
+            }
             int d = tile_dist(o->tile, me->tile);
             if (d < bestDistance) {
                 bestDistance = d;
                 best = o;
             }
         }
-        if (best == NULL) {
+        if (best == NULL && w.size() >= 2 && w[1] == "world") {
+            // Already out (the world map has no exit grids): repeating the hop is harmless.
+            result_line("NOTE goto_exit world: no exit grid here (already left?)");
+        } else if (best == NULL) {
             check_failed("goto_exit: no exit grid on this map level");
         } else {
-            result_line("NOTE goto_exit tile %d, %d tiles away", best->tile, bestDistance);
+            // A far exit is reached in hops of up to 25 tiles, like a player clicking across the
+            // screen: one click a hundred tiles away is more than the pathfinder plans.
+            int target = best->tile;
+            if (bestDistance > 25) {
+                target = me->tile;
+                for (int step = 0; step < 25; step++) {
+                    target = tile_num_in_direction(target, tile_dir(target, best->tile), 1);
+                }
+            }
+            result_line("NOTE goto_exit tile %d, %d tiles away (walking to %d)", best->tile, bestDistance, target);
             if (coopnet_is_client_in_synced_combat()) {
-                coopnet_on_client_combat_move_click(best->tile);
+                coopnet_on_client_combat_move_click(target);
             } else {
-                coopnet_on_client_click(best->tile);
+                coopnet_on_client_click(target);
             }
             check_passed("goto_exit");
         }
@@ -912,7 +949,7 @@ void execute_line(const std::string& rawLine, uint32_t now)
         check_passed("xp " + w[1]);
     } else if ((cmd == "hp" || cmd == "damage" || cmd == "rads" || cmd == "poison" || cmd == "give") && w.size() >= 3) {
         // <command> <dude|companion> <number> ...   (test helpers: set or change health, radiation, poison; give items)
-        Object* who = w[1] == "dude" ? obj_dude : coopnet_get_companion();
+        Object* who = autotest_target(w[1]);
         int amount = atoi(w[2].c_str());
         if (who == NULL) {
             check_failed(cmd + ": no " + w[1]);
@@ -947,7 +984,7 @@ void execute_line(const std::string& rawLine, uint32_t now)
         Object* attacker = NULL;
         int bestDistance = 1 << 30;
         for (Object* o = obj_find_first_at(map_elevation); o != NULL; o = obj_find_next_at()) {
-            if (FID_TYPE(o->fid) != OBJ_TYPE_CRITTER || o == obj_dude || o == coopnet_get_companion() || o->tile == -1
+            if (FID_TYPE(o->fid) != OBJ_TYPE_CRITTER || o == obj_dude || coopnet_is_companion(o) || o->tile == -1
                 || critter_is_dead(o) || o->data.critter.combat.team == obj_dude->data.critter.combat.team) {
                 continue;
             }
@@ -974,7 +1011,7 @@ void execute_line(const std::string& rawLine, uint32_t now)
         check_passed("cursor " + w[1]);
     } else if (cmd == "wield" && w.size() >= 3) {
         // wield <dude|companion> <weapon pid> [ammo pid]: a loaded weapon in the right hand.
-        Object* who = w[1] == "dude" ? obj_dude : coopnet_get_companion();
+        Object* who = autotest_target(w[1]);
         Object* weapon = NULL;
         int weaponPid = atoi(w[2].c_str());
         int ammoPid = w.size() >= 4 ? atoi(w[3].c_str()) : -1;
@@ -992,7 +1029,7 @@ void execute_line(const std::string& rawLine, uint32_t now)
         }
     } else if (cmd == "holster" && w.size() >= 2) {
         // holster <dude|companion>: nothing in either hand (people don't talk to someone holding a weapon).
-        Object* who = w[1] == "dude" ? obj_dude : coopnet_get_companion();
+        Object* who = autotest_target(w[1]);
         if (who == NULL) {
             check_failed("holster: no " + w[1]);
         } else {
@@ -1015,7 +1052,7 @@ void execute_line(const std::string& rawLine, uint32_t now)
         Object* target = NULL;
         int bestDistance = 1 << 30;
         for (Object* o = obj_find_first_at(map_elevation); o != NULL; o = obj_find_next_at()) {
-            if (FID_TYPE(o->fid) != OBJ_TYPE_CRITTER || o == obj_dude || o == coopnet_get_companion() || o->tile == -1
+            if (FID_TYPE(o->fid) != OBJ_TYPE_CRITTER || o == obj_dude || coopnet_is_companion(o) || o->tile == -1
                 || critter_is_dead(o) || o->data.critter.combat.team == obj_dude->data.critter.combat.team) {
                 continue;
             }
@@ -1063,6 +1100,87 @@ void execute_line(const std::string& rawLine, uint32_t now)
             action_use_an_object(obj_dude, door);
             check_passed("use_door at distance " + std::to_string(bestDistance));
         }
+    } else if (cmd == "use_elevator") {
+        // Use the nearest elevator: a friend asks the host (its own character walks over and uses it,
+        // and the friend then drives the floor choice); the host uses it with its own character.
+        Object* me = coopnet_get_role() == CoopRole::Client ? coopnet_get_view_companion() : obj_dude;
+        if (me == NULL) {
+            me = obj_dude;
+        }
+        Object* elevator = NULL;
+        int bestDistance = 1 << 30;
+        for (Object* o = obj_find_first_at(map_elevation); o != NULL; o = obj_find_next_at()) {
+            if (FID_TYPE(o->fid) != OBJ_TYPE_SCENERY || o->tile == -1 || (o->flags & OBJECT_HIDDEN) != 0) {
+                continue;
+            }
+            // Most elevator panels (Vault 13 too) are plain scenery whose script opens the floor screen, so
+            // a script file named "elev..." counts as well as the prototype's elevator type (the shown name
+            // depends on the game's language).
+            Proto* proto = NULL;
+            bool namedElevator = false;
+            Script* script;
+            char scriptName[64];
+            if (o->sid != -1 && scr_ptr(o->sid, &script) != -1
+                && scr_list_str(script->scr_script_idx, scriptName, sizeof(scriptName)) != -1) {
+                namedElevator = compat_strnicmp(scriptName, "elev", 4) == 0 || strstr(scriptName, "ELEV") != NULL
+                    || strstr(scriptName, "elev") != NULL;
+            }
+            if (proto_ptr(o->pid, &proto) == -1 || proto == NULL
+                || (proto->scenery.type != SCENERY_TYPE_ELEVATOR && !namedElevator)) {
+                continue;
+            }
+            int d = tile_dist(o->tile, me->tile);
+            if (d < bestDistance) {
+                bestDistance = d;
+                elevator = o;
+            }
+        }
+        if (elevator == NULL) {
+            // List the nearest scenery so the right name can be added.
+            int listed = 0;
+            for (Object* o = obj_find_first_at(map_elevation); o != NULL && listed < 12; o = obj_find_next_at()) {
+                Script* script;
+                char scriptName[64];
+                if (FID_TYPE(o->fid) == OBJ_TYPE_SCENERY && o->tile != -1 && o->sid != -1
+                    && scr_ptr(o->sid, &script) != -1
+                    && scr_list_str(script->scr_script_idx, scriptName, sizeof(scriptName)) != -1) {
+                    result_line("NOTE scripted scenery '%s' pid %d at tile %d, %d tiles away", scriptName, o->pid,
+                        o->tile, tile_dist(o->tile, me->tile));
+                    listed++;
+                }
+            }
+            // How many objects of each kind (and scenery of each type) this level has, and the closest ones.
+            int kinds[8] = { 0 };
+            int sceneryTypes[8] = { 0 };
+            for (Object* o = obj_find_first_at(map_elevation); o != NULL; o = obj_find_next_at()) {
+                kinds[FID_TYPE(o->fid) & 7]++;
+                Proto* proto = NULL;
+                if (FID_TYPE(o->fid) == OBJ_TYPE_SCENERY && proto_ptr(o->pid, &proto) != -1 && proto != NULL) {
+                    sceneryTypes[proto->scenery.type & 7]++;
+                }
+                if (o->tile != -1 && tile_dist(o->tile, me->tile) <= 12 && FID_TYPE(o->fid) != OBJ_TYPE_WALL
+                    && FID_TYPE(o->fid) != OBJ_TYPE_MISC) {
+                    result_line("NOTE near: kind %d pid %d at tile %d, %d tiles away, scenery type %d",
+                        FID_TYPE(o->fid), o->pid, o->tile, tile_dist(o->tile, me->tile),
+                        FID_TYPE(o->fid) == OBJ_TYPE_SCENERY && proto != NULL ? proto->scenery.type : -1);
+                }
+            }
+            result_line("NOTE level %d (me at tile %d): kinds item %d critter %d scenery %d wall %d tile %d misc %d; "
+                "scenery types door %d stairs %d elevator %d ladder-up %d ladder-down %d generic %d",
+                map_elevation, me->tile, kinds[0], kinds[1], kinds[2], kinds[3], kinds[4], kinds[5],
+                sceneryTypes[0], sceneryTypes[1], sceneryTypes[2], sceneryTypes[3], sceneryTypes[4], sceneryTypes[5]);
+            check_failed("use_elevator: no elevator on this map level");
+        } else {
+            result_line("NOTE elevator pid %d at tile %d, %d tiles away", elevator->pid, elevator->tile, bestDistance);
+            g_actionMark = log_position();
+            g_haveActionMark = true;
+            if (coopnet_get_role() == CoopRole::Client) {
+                coopnet_on_client_use_click(elevator->pid, elevator->tile, elevator->elevation);
+            } else {
+                action_use_an_object(obj_dude, elevator);
+            }
+            check_passed("use_elevator");
+        }
     } else if (cmd == "drop_item" && w.size() >= 2) {
         // An item on the ground next to the player's character.
         Object* item = NULL;
@@ -1101,7 +1219,7 @@ void execute_line(const std::string& rawLine, uint32_t now)
         Object* person = NULL;
         int bestDistance = 1 << 30;
         for (Object* o = obj_find_first_at(map_elevation); o != NULL; o = obj_find_next_at()) {
-            if (FID_TYPE(o->fid) != OBJ_TYPE_CRITTER || o == obj_dude || o == coopnet_get_companion() || o->tile == -1
+            if (FID_TYPE(o->fid) != OBJ_TYPE_CRITTER || o == obj_dude || coopnet_is_companion(o) || o->tile == -1
                 || (o->flags & OBJECT_HIDDEN) != 0 || critter_is_dead(o) || o->sid == -1
                 || o->data.critter.combat.team != obj_dude->data.critter.combat.team * 0 + o->data.critter.combat.team) {
                 continue;
@@ -1129,7 +1247,7 @@ void execute_line(const std::string& rawLine, uint32_t now)
         // Host: kill (or just list) the party NPCs that follow the host, e.g. Ian.
         int found = 0;
         for (Object* o = obj_find_first_at(map_elevation); o != NULL; o = obj_find_next_at()) {
-            if (FID_TYPE(o->fid) != OBJ_TYPE_CRITTER || o == obj_dude || o == coopnet_get_companion() || o->tile == -1 || !isPartyMember(o)) {
+            if (FID_TYPE(o->fid) != OBJ_TYPE_CRITTER || o == obj_dude || coopnet_is_companion(o) || o->tile == -1 || !isPartyMember(o)) {
                 continue;
             }
             found++;
@@ -1150,7 +1268,7 @@ void execute_line(const std::string& rawLine, uint32_t now)
         int wanted = w.size() >= 2 ? atoi(w[1].c_str()) : 0;
         std::vector<std::pair<int, Object*>> found;
         for (Object* o = obj_find_first_at(map_elevation); o != NULL; o = obj_find_next_at()) {
-            if (FID_TYPE(o->fid) != OBJ_TYPE_CRITTER || o == obj_dude || o == coopnet_get_companion() || o->tile == -1
+            if (FID_TYPE(o->fid) != OBJ_TYPE_CRITTER || o == obj_dude || coopnet_is_companion(o) || o->tile == -1
                 || (o->flags & OBJECT_HIDDEN) != 0 || critter_is_dead(o) || (o->sid == -1 && coopnet_get_role() != CoopRole::Client) || isPartyMember(o)) {
                 continue;
             }

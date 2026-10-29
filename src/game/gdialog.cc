@@ -727,9 +727,9 @@ void gdialog_enter(Object* target, int a2)
         // just did not talk to the friend at all ("people deciding not to talk", found by the
         // barter autotest). Barter already swaps the player the same way.
         Object* coopTalkSavedDude = NULL;
-        if (coopnet_get_role() == CoopRole::Host && coopnet_dialogue_driven_by_client() && coopnet_get_companion() != NULL) {
+        if (coopnet_get_role() == CoopRole::Host && coopnet_dialogue_driver_companion() != NULL) {
             coopTalkSavedDude = obj_dude;
-            obj_dude = coopnet_get_companion();
+            obj_dude = coopnet_dialogue_driver_companion();
             debug_printf("\nCoop: the friend's character is the one talking (scripts see it as the player)\n");
         }
         debug_printf("\nCoop-talk: talker pid %d, charisma %d, speech %d, NPC reaction %d\n", obj_dude->pid,
@@ -1706,6 +1706,14 @@ static int gDialogProcess()
         // as the "choose option N" key. See coopnet_dialogue_filter_input().
         keyCode = coopnet_dialogue_filter_input(keyCode);
 
+        // Coop: the friend driving the conversation pressed Escape -- it ends here, like an answer
+        // that leads nowhere. Fallout has no such key, but with several players an abandoned
+        // conversation would keep everyone else from talking to anybody.
+        if (keyCode == COOP_DIALOGUE_LEAVE_KEY) {
+            debug_printf("\nCoop: the friend left the conversation (Escape)\n");
+            break;
+        }
+
         convertMouseWheelToArrowKey(&keyCode);
 
         if (keyCode == KEY_CTRL_Q || keyCode == KEY_CTRL_X || keyCode == KEY_F10) {
@@ -1728,9 +1736,9 @@ static int gDialogProcess()
                 // inventory, not the host character's -- and the client sees
                 // and operates the host's real trade screen (remote screen).
                 Object* coopSavedDude = NULL;
-                if (coopnet_dialogue_driven_by_client() && coopnet_get_companion() != NULL) {
+                if (coopnet_dialogue_driver_companion() != NULL) {
                     coopSavedDude = obj_dude;
-                    obj_dude = coopnet_get_companion();
+                    obj_dude = coopnet_dialogue_driver_companion();
                     // The trade window reads its player from inven_dude, a
                     // separate variable set earlier -- swapping obj_dude alone
                     // left it on the HOST's character (confirmed via testing:

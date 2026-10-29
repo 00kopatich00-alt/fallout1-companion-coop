@@ -355,7 +355,7 @@ int trait_level_of(Object* critter, int trait)
     if (critter == obj_dude) {
         return trait_level(trait);
     }
-    if (coopnet_get_role() != CoopRole::None && critter == coopnet_get_companion()) {
+    if (coopnet_get_role() != CoopRole::None && coopnet_is_companion(critter)) {
         // On the client's own machine the local traits already are that player's.
         return coopnet_get_role() == CoopRole::Host ? trait_coop_has[trait] : trait_level(trait);
     }

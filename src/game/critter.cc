@@ -186,11 +186,12 @@ char* critter_name(Object* critter)
         return pc_name;
     }
 
-    if (critter == coopnet_get_companion()) {
-        // The companion has no script (see coopnet.h), so it would otherwise
-        // fall through below to proto_name(critter->pid), which knows nothing
-        // about it. Show the client's own character name once it's known.
-        return const_cast<char*>(coopnet_get_companion_name());
+    // Coop: a friend's character has no script (see coopnet.h), so it would
+    // otherwise fall through below to proto_name(critter->pid), which knows
+    // nothing about it. Show that friend's own character name.
+    const char* coopFriendName = coopnet_friend_name(critter);
+    if (coopFriendName != NULL) {
+        return const_cast<char*>(coopFriendName);
     }
 
     if (critter->field_80 == -1) {
@@ -278,7 +279,7 @@ static bool critter_has_body_effects(Object* obj)
         return true;
     }
     // Only while it is on a map: between maps (the world map) its data is being rebuilt.
-    return obj != NULL && obj == coopnet_get_companion() && coopnet_companion_is_current();
+    return obj != NULL && coopnet_companion_is_current(obj);
 }
 
 static int event_of_effect_owner(Object* obj, void* data)
@@ -335,7 +336,7 @@ int critter_check_poison(Object* obj, void* data)
     MessageListItem messageListItem;
 
     if (!critter_has_body_effects(obj)) {
-        if (obj != NULL && obj == coopnet_get_companion() && obj->data.critter.poison > 0) {
+        if (obj != NULL && coopnet_is_companion(obj) && obj->data.critter.poison > 0) {
             // Coop: the friend's character is between maps: keep its poison going, check again later.
             queue_add(GAME_TIME_TICKS_PER_HOUR, obj, NULL, EVENT_TYPE_POISON);
         }
@@ -387,9 +388,11 @@ int critter_adjust_rads(Object* obj, int amount)
     // character reaches the friend's too (with the friend's own resistance). Medicine does not:
     // only doses are shared.
     if (obj == obj_dude && amount > 0 && coopnet_get_role() == CoopRole::Host) {
-        Object* companion = coopnet_get_companion();
-        if (companion != NULL && (companion->data.critter.combat.results & DAM_DEAD) == 0) {
-            critter_adjust_rads(companion, amount);
+        for (int slot = 0; slot < COOP_MAX_FRIENDS; slot++) {
+            Object* companion = coopnet_get_companion_slot(slot);
+            if (companion != NULL && (companion->data.critter.combat.results & DAM_DEAD) == 0) {
+                critter_adjust_rads(companion, amount);
+            }
         }
     }
 
@@ -682,7 +685,7 @@ void critter_reapply_rad_penalty(Object* obj)
 int critter_process_rads(Object* obj, void* data)
 {
     RadiationEvent* radiationEvent = (RadiationEvent*)data;
-    if (obj != obj_dude && obj == coopnet_get_companion() && !critter_has_body_effects(obj)) {
+    if (obj != obj_dude && coopnet_is_companion(obj) && !critter_has_body_effects(obj)) {
         // Coop: the friend's character is between maps (its data is being rebuilt): try again in an hour.
         RadiationEvent* later = (RadiationEvent*)mem_malloc(sizeof(*later));
         if (later != NULL) {
@@ -854,7 +857,7 @@ void critter_kill(Object* critter, int anim, bool refresh_window)
     // sends GAME_OVER. Killing the copy here quit the client to the menu by itself while
     // the host played on.
     if (coopnet_get_role() == CoopRole::Client && coopnet_is_connected()
-        && (critter == obj_dude || critter == coopnet_get_companion())) {
+        && (critter == obj_dude || coopnet_is_companion(critter))) {
         return;
     }
 

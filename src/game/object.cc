@@ -1431,14 +1431,14 @@ int obj_move_to_tile(Object* obj, int tile, int elevation, Rect* rect)
     // Coop: the client walks its companion onto an exit grid it clicked on
     // (host-side pathing, so unreachable exits -- behind a locked door -- stay
     // unreachable): that is the client leading the party out of the location.
-    if (!coopIsClient && obj != obj_dude && obj == coopnet_get_companion()) {
+    if (!coopIsClient && obj != obj_dude && coopnet_is_companion(obj)) {
         for (ObjectListNode* n = objectTable[tile]; n != NULL; n = n->next) {
             Object* o = n->obj;
             if (elevation < o->elevation) {
                 break;
             }
             if (elevation == o->elevation && FID_TYPE(o->fid) == OBJ_TYPE_MISC && o->pid >= 0x5000010 && o->pid <= 0x5000017) {
-                bool allowed = coopnet_host_companion_exit_allowed(tile);
+                bool allowed = coopnet_host_companion_exit_allowed(obj, tile);
                 debug_printf("\nCoop: companion stepped on an exit grid, tile=%d allowed=%d\n", tile, allowed);
                 if (!allowed) {
                     break;
@@ -1449,7 +1449,7 @@ int obj_move_to_tile(Object* obj, int tile, int elevation, Rect* rect)
                 transition.tile = o->data.misc.tile;
                 transition.elevation = o->data.misc.elevation;
                 transition.rotation = o->data.misc.rotation;
-                coopnet_note_client_led_exit();
+                coopnet_note_client_led_exit(obj);
                 map_leave_map(&transition);
                 break;
             }

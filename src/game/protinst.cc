@@ -1154,7 +1154,7 @@ int obj_use(Object* a1, Object* a2)
     int sid = -1;
     bool scriptOverrides = false;
 
-    if (a1 != obj_dude && a1 == coopnet_get_companion()) {
+    if (a1 != obj_dude && coopnet_is_companion(a1)) {
         debug_printf("\nCoop-debug: obj_use reached for the companion: pid=%d type=%d tile=%d\n", a2->pid, type, a2->tile);
     }
 
@@ -1186,7 +1186,7 @@ int obj_use(Object* a1, Object* a2)
         // frequently checks who's using it against dude_obj specifically. The
         // companion isn't obj_dude, so those checks silently failed and the
         // script did nothing at all.
-        Object* scriptUser = (a1 != obj_dude && a1 == coopnet_get_companion()) ? obj_dude : a1;
+        Object* scriptUser = (a1 != obj_dude && coopnet_is_companion(a1)) ? obj_dude : a1;
 
         // Coop: mark that the client's companion is the one using this object
         // RIGHT NOW, at the moment of use -- not when its walk to the object
@@ -1196,7 +1196,7 @@ int obj_use(Object* a1, Object* a2)
         // which a walk across a room easily outlasts: the elevator screen then
         // opened view-only for the client and the host had to pick the floor.
         if (scriptUser != a1) {
-            coopnet_note_companion_used_object();
+            coopnet_note_companion_used_object(a1);
         }
 
         int partyElevation = obj_dude->elevation;
@@ -1230,10 +1230,10 @@ int obj_use(Object* a1, Object* a2)
     // the floor-select request on its own (the script's checks are written
     // around the player, or it has no script) -- raise it from the prototype's
     // own elevator type so the client can still ride the elevator.
-    if (a1 != obj_dude && a1 == coopnet_get_companion()
+    if (a1 != obj_dude && coopnet_is_companion(a1)
         && sceneryProto->scenery.type == SCENERY_TYPE_ELEVATOR && !scripts_elevator_requested()) {
         debug_printf("\nCoop-debug: raising elevator request type=%d for the companion\n", sceneryProto->scenery.data.elevator.type);
-        coopnet_note_companion_used_object();
+        coopnet_note_companion_used_object(a1);
         scripts_request_elevator(sceneryProto->scenery.data.elevator.type);
         scriptOverrides = true;
     }
@@ -1391,7 +1391,7 @@ int obj_use_door(Object* a1, Object* a2, int a3)
         // client's companion isn't obj_dude, so it walked straight through
         // doors the host's character is not allowed through. The companion is
         // the player's party: ask the script as the host's character would.
-        Object* scriptUser = (a1 != obj_dude && a1 == coopnet_get_companion()) ? obj_dude : a1;
+        Object* scriptUser = (a1 != obj_dude && coopnet_is_companion(a1)) ? obj_dude : a1;
         scr_set_objs(sid, scriptUser, a2);
         exec_script_proc(sid, SCRIPT_PROC_USE);
 

@@ -970,7 +970,7 @@ static int is_next_to(Object* a1, Object* a2)
     MessageListItem messageListItem;
 
     if (obj_dist(a1, a2) > 1) {
-        if (a1 == coopnet_get_companion()) {
+        if (coopnet_is_companion(a1)) {
             debug_printf("\nCoop-debug: companion stopped %d tiles from pid=%d (tile %d vs %d): not next to it\n",
                 obj_dist(a1, a2), a2->pid, a1->tile, a2->tile);
         }
@@ -1933,7 +1933,7 @@ int action_talk_to(Object* a1, Object* a2)
 {
     // Coop: the client's companion walks over and talks, exactly like the host's
     // own character does when clicking an NPC from afar.
-    if (a1 != obj_dude && a1 != coopnet_get_companion()) {
+    if (a1 != obj_dude && !coopnet_is_companion(a1)) {
         return -1;
     }
 
@@ -1978,13 +1978,13 @@ static int can_talk_to(Object* a1, Object* a2)
             if (message_search(&misc_message_file, &messageListItem)) {
                 display_print(messageListItem.text);
             }
-        } else if (a1 == coopnet_get_companion()) {
+        } else if (coopnet_is_companion(a1)) {
             // Coop: the friend asked to talk and cannot reach the person (a counter or wall in the way,
             // or too far): tell it so instead of silently doing nothing.
             debug_printf("\nCoop: the friend cannot reach pid %d to talk (distance %d, blocked %d)\n",
                 a2->pid, obj_dist(a1, a2), combat_is_shot_blocked(a1, a1->tile, a2->tile, a2, NULL) ? 1 : 0);
             if (message_search(&misc_message_file, &messageListItem)) {
-                coopnet_host_tell_client(messageListItem.text);
+                coopnet_host_tell_client(a1, messageListItem.text);
             }
         }
 
@@ -1999,8 +1999,8 @@ static int talk_to(Object* a1, Object* a2)
 {
     // Coop: the client's companion reached the NPC -- the client drives this
     // conversation (the host watches).
-    if (a1 != obj_dude && a1 == coopnet_get_companion()) {
-        coopnet_note_companion_reached_npc();
+    if (a1 != obj_dude && coopnet_is_companion(a1)) {
+        coopnet_note_companion_reached_npc(a1);
     } else if (a1 == obj_dude) {
         // Coop: the host's own Talk click -- see g_coopDialogueHostInitiated's
         // comment in coopnet.cc for why this has to be marked explicitly.

@@ -307,7 +307,7 @@ bool perk_is_player(Object* critter)
     if (critter == obj_dude) {
         return true;
     }
-    return coopnet_get_role() != CoopRole::None && critter == coopnet_get_companion();
+    return coopnet_get_role() != CoopRole::None && coopnet_is_companion(critter);
 }
 
 int perk_level_of(Object* critter, int perk)
@@ -318,7 +318,7 @@ int perk_level_of(Object* critter, int perk)
     if (critter == obj_dude) {
         return perk_lev[perk];
     }
-    if (coopnet_get_role() != CoopRole::None && critter == coopnet_get_companion()) {
+    if (coopnet_get_role() != CoopRole::None && coopnet_is_companion(critter)) {
         // On the host the companion has the perks its player sent; on the client's own
         // machine the local table already is that player's.
         return coopnet_get_role() == CoopRole::Host ? perk_coop_lev[perk] : perk_lev[perk];

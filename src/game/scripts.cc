@@ -368,8 +368,11 @@ int gtime_q_process(Object* obj, void* data)
     rc = critter_check_rads(obj_dude);
 
     // Coop: the friend's character gets its own radiation check (see critter_has_body_effects()).
-    if (coopnet_companion_is_current()) {
-        critter_check_rads(coopnet_get_companion());
+    for (int slot = 0; slot < COOP_MAX_FRIENDS; slot++) {
+        Object* companion = coopnet_get_companion_slot(slot);
+        if (companion != NULL && coopnet_companion_is_current(companion)) {
+            critter_check_rads(companion);
+        }
     }
 
     queue_clear_type(EVENT_TYPE_GAME_TIME, NULL);
@@ -920,7 +923,7 @@ int scripts_check_state()
 
     if ((scriptState.requests & SCRIPT_REQUEST_STEALING) != 0) {
         scriptState.requests &= ~SCRIPT_REQUEST_STEALING;
-        if (scriptState.stealingBy == coopnet_get_companion()) {
+        if (coopnet_is_companion(scriptState.stealingBy)) {
             if (!coopnet_host_run_companion_steal(scriptState.stealingBy, scriptState.stealingFrom)) {
                 coopnet_auto_resolve_companion_steal(scriptState.stealingBy, scriptState.stealingFrom);
             }
@@ -2473,11 +2476,11 @@ bool scr_chk_spatials_in(Object* object, int tile, int elevation)
                 // is the player's party: run them as the host's character, as
                 // is done for doors and other objects the companion uses.
                 Object* spatialSource = object;
-                if (object != obj_dude && object == coopnet_get_companion()) {
+                if (object != obj_dude && coopnet_is_companion(object)) {
                     debug_printf("\nCoop-debug: companion spatial trigger fired, script sid=%d tile=%d map=%.16s\n", script->scr_id, tile, map_data.name);
                     spatialSource = obj_dude;
                     // Whatever screen it opens (an elevator's floor choice) is the client's to drive.
-                    coopnet_note_companion_used_object();
+                    coopnet_note_companion_used_object(object);
                 }
                 // NOTE: Uninline.
                 scr_set_objs(script->scr_id, spatialSource, NULL);

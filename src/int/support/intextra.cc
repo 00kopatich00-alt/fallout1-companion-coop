@@ -870,26 +870,31 @@ static void op_dude_obj(Program* program)
     // untouched, since those don't run via either of these two procs.
     Object* result = obj_dude;
 
-    Object* companion = coopnet_get_companion();
-    if (companion != NULL) {
-        int sid = scr_find_sid_from_program(program);
-        Script* script;
-        if (scr_ptr(sid, &script) != -1
-            && (script->action == SCRIPT_PROC_COMBAT || script->action == SCRIPT_PROC_CRITTER)) {
-            Object* self = script->owner;
-            if (self != NULL && obj_dist(self, companion) < obj_dist(self, obj_dude)) {
+    int sid = scr_find_sid_from_program(program);
+    Script* script;
+    if (scr_ptr(sid, &script) != -1
+        && (script->action == SCRIPT_PROC_COMBAT || script->action == SCRIPT_PROC_CRITTER)
+        && script->owner != NULL) {
+        // The nearest member of the party, any of the friends included.
+        Object* self = script->owner;
+        int bestDist = obj_dist(self, obj_dude);
+        for (int slot = 0; slot < COOP_MAX_FRIENDS; slot++) {
+            Object* companion = coopnet_get_companion_slot(slot);
+            if (companion != NULL && obj_dist(self, companion) < bestDist) {
+                bestDist = obj_dist(self, companion);
                 result = companion;
-                debug_printf("\nCoop-debug: DUDE_OBJ substituted companion for critter pid=%d during action=%d (distToCompanion=%d, distToDude=%d)\n",
-                    self->pid, script->action, obj_dist(self, companion), obj_dist(self, obj_dude));
+                debug_printf("\nCoop-debug: DUDE_OBJ substituted companion (slot %d) for critter pid=%d during action=%d (distToCompanion=%d, distToDude=%d)\n",
+                    slot, self->pid, script->action, bestDist, obj_dist(self, obj_dude));
             }
         }
+    }
 
-        // A conversation the CLIENT started is with the companion, not with
-        // the host's character: every dialogue script asks DUDE_OBJ who it's
-        // talking to (reaction, skill/stat checks, quest items, karma).
-        if (coopnet_dialogue_driven_by_client()) {
-            result = companion;
-        }
+    // A conversation a FRIEND started is with that friend's character, not with
+    // the host's: every dialogue script asks DUDE_OBJ who it's talking to
+    // (reaction, skill/stat checks, quest items, karma).
+    Object* talker = coopnet_dialogue_driver_companion();
+    if (talker != NULL) {
+        result = talker;
     }
 
     programStackPushPointer(program, result);

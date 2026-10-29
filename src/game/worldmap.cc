@@ -3768,19 +3768,25 @@ static void CalcTimeAdder()
     float outdoorsman;
 
     outdoorsman = (float)skill_level(obj_dude, SKILL_OUTDOORSMAN);
-    // Coop: the party travels with the better guide of the two players (the friend's character has
+    // Coop: the party travels with its best guide (each friend's character has
     // the skills its player chose).
-    Object* friendsCharacter = coopnet_get_companion();
-    Proto* friendsProto = NULL;
-    if (coopnet_get_role() == CoopRole::Host && friendsCharacter != NULL && friendsCharacter != obj_dude
-        && proto_ptr(friendsCharacter->pid, &friendsProto) != -1 && friendsProto != NULL) {
-        float friendsOutdoorsman = (float)skill_level(friendsCharacter, SKILL_OUTDOORSMAN);
-        debug_printf("\nCoop: travel speed: host outdoorsman %d, friend's outdoorsman %d\n", static_cast<int>(outdoorsman), static_cast<int>(friendsOutdoorsman));
-        if (friendsOutdoorsman > outdoorsman) {
-            outdoorsman = friendsOutdoorsman;
+    if (coopnet_get_role() == CoopRole::Host) {
+        for (int slot = 0; slot < COOP_MAX_FRIENDS; slot++) {
+            Object* friendsCharacter = coopnet_get_companion_slot(slot);
+            Proto* friendsProto = NULL;
+            if (friendsCharacter == NULL || friendsCharacter == obj_dude) {
+                continue;
+            }
+            if (proto_ptr(friendsCharacter->pid, &friendsProto) == -1 || friendsProto == NULL) {
+                debug_printf("\nCoop: travel speed: friend %d's character (pid %d) has no stat sheet right now -- skipped\n", slot + 1, friendsCharacter->pid);
+                continue;
+            }
+            float friendsOutdoorsman = (float)skill_level(friendsCharacter, SKILL_OUTDOORSMAN);
+            debug_printf("\nCoop: travel speed: host outdoorsman %d, friend %d's outdoorsman %d\n", static_cast<int>(outdoorsman), slot + 1, static_cast<int>(friendsOutdoorsman));
+            if (friendsOutdoorsman > outdoorsman) {
+                outdoorsman = friendsOutdoorsman;
+            }
         }
-    } else if (coopnet_get_role() == CoopRole::Host && friendsCharacter != NULL) {
-        debug_printf("\nCoop: travel speed: the friend's character (pid %d) has no stat sheet right now -- using the host's skill\n", friendsCharacter->pid);
     }
     if (outdoorsman > 100.0f) {
         outdoorsman = 100.0f;

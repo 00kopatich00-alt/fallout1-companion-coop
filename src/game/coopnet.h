@@ -104,9 +104,32 @@ bool coopnet_is_connected();
 // yet (host: not yet spawned/found; client: not yet resolved from handshake).
 Object* coopnet_get_companion();
 
+// True for a friend's character: on the host any joined friend's companion,
+// on a friend's PC its own character.
+bool coopnet_is_companion(Object* obj);
+
+// The name to show for any friend's character -- on the host every friend's,
+// on a friend's PC its own and the other friends' (from the host). NULL for
+// everyone else.
+const char* coopnet_friend_name(Object* obj);
+
+// coopnet_is_companion(), plus, on a friend's PC, the other friends'
+// characters (they are friends, not enemies: no red outline).
+bool coopnet_is_friend_character(Object* obj);
+
+// True for a friend's character whose friend is connected right now.
+bool coopnet_companion_is_played(Object* obj);
+
+// Up to this many friends can join one host.
+#define COOP_MAX_FRIENDS 7
+
+// Host: the companion of friend slot `slot` (0 .. COOP_MAX_FRIENDS-1), NULL when
+// that slot has none. A friend's PC has only its own, in slot 0.
+Object* coopnet_get_companion_slot(int slot);
+
 // Host: true when the friend's character is on the current map and its data can be used (false while
 // a map loads or the party is on the world map, between maps).
-bool coopnet_companion_is_current();
+bool coopnet_companion_is_current(Object* companion);
 
 // Called from gmouse.cc when the local role is Client: instead of moving the
 // client's own (mirrored, non-authoritative) obj_dude, sends the clicked tile
@@ -254,7 +277,7 @@ void coopnet_elevator_screen_end();
 // Host: the client's companion just used an item/scenery object -- call right
 // before the actual action_use_an_object() so a screen that opens as a
 // result (currently just the elevator) knows to let the client drive it.
-void coopnet_note_companion_used_object();
+void coopnet_note_companion_used_object(Object* companion);
 
 // Host: repositions the companion to obj_dude's current tile/elevation --
 // call after any teleport that's supposed to carry "the whole party" (an
@@ -265,10 +288,10 @@ void coopnet_host_move_companion_with_dude();
 // Host: the companion (client's character) just stepped onto an exit grid at
 // `tile`. True only if that is the exact tile the client clicked, i.e. a
 // deliberate exit (never the companion merely following the host).
-bool coopnet_host_companion_exit_allowed(int tile);
+bool coopnet_host_companion_exit_allowed(Object* companion, int tile);
 
 // Host: the exit the client just triggered leads to a screen the client drives.
-void coopnet_note_client_led_exit();
+void coopnet_note_client_led_exit(Object* companion);
 
 // Host: a map load (and the placement of the party that follows it) is in
 // progress -- the host must not read obj_dude's position for the client's
@@ -314,7 +337,7 @@ void coopnet_notify_attack_sfx(Object* owner, const char* soundName, int delay);
 
 // Host: the client's companion has just walked up to an NPC it was sent to
 // talk to; the conversation that starts next is driven by the client.
-void coopnet_note_companion_reached_npc();
+void coopnet_note_companion_reached_npc(Object* companion);
 
 // Host: the host's own character (not the companion) is the one whose Talk
 // click is opening this conversation -- takes priority over the "whoever's
@@ -459,10 +482,18 @@ void coopnet_notify_dialogue_end();
 void coopnet_on_client_talk_click(Object* target);
 
 // Host: shows a line in the client's message box.
-void coopnet_host_tell_client(const char* text);
+void coopnet_host_tell_client(Object* companion, const char* text);
 void coopnet_mark_dialogue_client_initiated(Object* npc);
 bool coopnet_on_client_dialogue_key(int keyCode);
 bool coopnet_dialogue_driven_by_client();
+
+// What coopnet_dialogue_filter_input() returns when the friend driving the
+// conversation pressed Escape: the host's conversation loop ends it.
+#define COOP_DIALOGUE_LEAVE_KEY 0x7F00
+
+// Host: the character of the friend driving the current (or about to start)
+// conversation, NULL when the host's own character is talking.
+Object* coopnet_dialogue_driver_companion();
 int coopnet_dialogue_filter_input(int keyCode);
 
 // Client presses a command button on the puppet dialogue window: 2 = barter,
