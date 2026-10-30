@@ -29,6 +29,7 @@
 #include "plib/gnw/input.h"
 #include "plib/gnw/memory.h"
 #include "plib/gnw/svga.h"
+#include "plib/gnw/text.h"
 
 namespace fallout {
 
@@ -876,6 +877,131 @@ void obj_render_pre_roof(Rect* rect, int elevation)
     }
 }
 
+// Coop: where each friend's name label goes -- centred above the character's picture, and moved up
+// over another label it would cover (friends standing together). Returns how many labels there are.
+static int obj_friend_name_layout(Object** friends, const char** names, Rect* rects, int max)
+{
+    int count = coopnet_friend_characters(friends, max);
+    int oldFont = text_curr();
+    text_font(101);
+    int height = text_height() + 2;
+    if (height > 20) {
+        height = 20;
+    }
+    for (int index = 0; index < count; index++) {
+        const char* name = coopnet_friend_name(friends[index]);
+        names[index] = name != NULL ? name : "";
+        int width = text_width(names[index]) + 2;
+        if (width > 256) {
+            width = 256;
+        }
+        Rect bound;
+        obj_bound(friends[index], &bound);
+        Rect* labelRect = &(rects[index]);
+        labelRect->ulx = (bound.ulx + bound.lrx) / 2 - width / 2;
+        labelRect->uly = bound.uly - height - 2;
+        labelRect->lrx = labelRect->ulx + width - 1;
+        labelRect->lry = labelRect->uly + height - 1;
+        for (int other = 0; other < index; other++) {
+            Rect* placed = &(rects[other]);
+            if (friends[other]->elevation == friends[index]->elevation
+                && labelRect->ulx <= placed->lrx && placed->ulx <= labelRect->lrx
+                && labelRect->uly <= placed->lry && placed->uly <= labelRect->lry) {
+                labelRect->uly = placed->uly - height;
+                labelRect->lry = labelRect->uly + height - 1;
+                other = -1; // check the new place against every label again
+            }
+        }
+    }
+    text_font(oldFont);
+    return count;
+}
+
+// Coop, once a frame: a label sits outside its character's picture, so the game's own redraw of a
+// moving character leaves the old one behind -- repaint where a label was and where it is now.
+void obj_refresh_friend_names()
+{
+    static Object* lastObject[16];
+    static Rect lastRect[16];
+    static int lastCount = 0;
+
+    Object* friends[16];
+    const char* names[16];
+    Rect rects[16];
+    int count = obj_friend_name_layout(friends, names, rects, 16);
+
+    for (int index = 0; index < lastCount; index++) {
+        bool same = false;
+        for (int other = 0; other < count; other++) {
+            if (friends[other] == lastObject[index] && memcmp(&(rects[other]), &(lastRect[index]), sizeof(Rect)) == 0) {
+                same = true;
+                break;
+            }
+        }
+        if (!same) {
+            tile_refresh_rect(&(lastRect[index]), map_elevation);
+        }
+    }
+    for (int index = 0; index < count; index++) {
+        bool same = false;
+        for (int other = 0; other < lastCount; other++) {
+            if (lastObject[other] == friends[index] && memcmp(&(rects[index]), &(lastRect[other]), sizeof(Rect)) == 0) {
+                same = true;
+                break;
+            }
+        }
+        if (!same) {
+            tile_refresh_rect(&(rects[index]), map_elevation);
+        }
+        lastObject[index] = friends[index];
+        lastRect[index] = rects[index];
+    }
+    lastCount = count;
+}
+
+// Coop: each friend's name over their character's head, so the players can tell who is who.
+static void obj_render_friend_names(Rect* rect, int elevation)
+{
+    Object* friends[16];
+    const char* names[16];
+    Rect rects[16];
+    int count = obj_friend_name_layout(friends, names, rects, 16);
+    if (count == 0) {
+        return;
+    }
+
+    int oldFont = text_curr();
+    text_font(101);
+    for (int index = 0; index < count; index++) {
+        Object* critter = friends[index];
+        if (critter->elevation != elevation || (critter->flags & OBJECT_HIDDEN) != 0
+            || (critter->data.critter.combat.results & DAM_DEAD) != 0 || names[index][0] == '\0') {
+            continue;
+        }
+
+        // The text with a dark outline, in a small buffer of its own.
+        static unsigned char label[256 * 20];
+        Rect labelRect = rects[index];
+        int width = labelRect.lrx - labelRect.ulx + 1;
+        int height = labelRect.lry - labelRect.uly + 1;
+        memset(label, 0, sizeof(label));
+        text_to_buf(label + width + 1, names[index], width - 2, width, colorTable[992]);
+        buf_outline(label, width, height, width, colorTable[0]);
+
+        int x = labelRect.ulx;
+        int y = labelRect.uly;
+        if (rect_inside_bound(&labelRect, rect, &labelRect) == 0) {
+            trans_buf_to_buf(label + width * (labelRect.uly - y) + (labelRect.ulx - x),
+                labelRect.lrx - labelRect.ulx + 1,
+                labelRect.lry - labelRect.uly + 1,
+                width,
+                back_buf + buf_width * labelRect.uly + labelRect.ulx,
+                buf_width);
+        }
+    }
+    text_font(oldFont);
+}
+
 // 0x47B5EC
 void obj_render_post_roof(Rect* rect, int elevation)
 {
@@ -908,6 +1034,7 @@ void obj_render_post_roof(Rect* rect, int elevation)
     }
 
     text_object_render(&updatedRect);
+    obj_render_friend_names(&updatedRect, elevation);
 
     ObjectListNode* objectListNode = floatingObjects;
     while (objectListNode != NULL) {

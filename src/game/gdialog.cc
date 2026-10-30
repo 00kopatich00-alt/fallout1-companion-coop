@@ -997,6 +997,12 @@ int scr_dialogue_exit()
             gdCenterTile = obj_dude->tile;
         }
         tile_scroll_to(gdCenterTile, 2);
+        // Coop: a conversation a friend held centred this screen on the speaker past the scroll
+        // blockers; scrolling back stops at the first blocker, which left the host's screen stuck there
+        // (no scrolling until the next map). Go straight back instead.
+        if (tile_center_tile != gdCenterTile && coopnet_get_role() != CoopRole::None) {
+            tile_set_center(gdCenterTile, TILE_SET_CENTER_REFRESH_WINDOW | TILE_SET_CENTER_FLAG_IGNORE_SCROLL_RESTRICTIONS);
+        }
     }
 
     talk_to_destroy_head_window();

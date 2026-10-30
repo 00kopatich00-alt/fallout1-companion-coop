@@ -32,6 +32,7 @@ int obj_load(DB_FILE* stream);
 int obj_save(DB_FILE* stream);
 void obj_render_pre_roof(Rect* rect, int elevation);
 void obj_render_post_roof(Rect* rect, int elevation);
+void obj_refresh_friend_names();
 int obj_new(Object** objectPtr, int fid, int pid);
 int obj_pid_new(Object** objectPtr, int pid);
 int obj_copy(Object** a1, Object* a2);

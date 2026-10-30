@@ -247,6 +247,8 @@ struct CoopCharacter {
     int32_t perks[PERK_COUNT];
     // 1 for each of the character's traits (Fast Shot, Finesse, Bloody Mess, Chem Reliant...).
     int32_t traits[TRAIT_COUNT];
+    // GENDER_MALE or GENDER_FEMALE: picks the body art (a female character was drawn male).
+    int32_t gender;
 };
 
 // Game and combat difficulty change damage, AI and skill rolls, all of which
@@ -269,7 +271,7 @@ struct CoopSettings {
 // Bumped whenever behavior changes in a way an older exe on the other side
 // would misread -- a mismatch is now refused with a clear message (see the
 // HELLO handling) instead of producing confusing half-working sessions.
-const uint32_t kCoopProtocolVersion = 16; // 16: up to three friends (other friends' characters arrive as mirrors)
+const uint32_t kCoopProtocolVersion = 17; // 17: the friend's gender in CHARACTER; 16: up to seven friends (mirrors)
 
 // The first two fields are the original HELLO and stay in front, so even an older client's
 // shorter HELLO can still be read far enough to refuse it with a clear message.
@@ -2207,6 +2209,31 @@ const char* coopnet_friend_name(Object* obj)
 bool coopnet_is_friend_character(Object* obj)
 {
     return obj != NULL && (coopnet_is_companion(obj) || (g_coopRole == CoopRole::Client && coopnet_is_mirror_pid(obj->pid)));
+}
+
+// The friends' characters on this PC (for the names drawn over their heads): the host's companions,
+// or on a friend's PC its own character and the other friends' mirrors.
+int coopnet_friend_characters(Object** out, int max)
+{
+    int count = 0;
+    if (g_coopRole == CoopRole::None) {
+        return 0;
+    }
+    for (int slot = 0; slot < kCoopMaxPeers && count < max; slot++) {
+        Object* companion = g_coopCompanion_[slot];
+        if (companion != NULL && companion->tile != -1) {
+            out[count++] = companion;
+        }
+    }
+    if (g_coopRole == CoopRole::Client) {
+        for (int i = 0; i < g_coopParticipantCount && count < max; i++) {
+            Object* o = g_coopParticipants[i].localObject;
+            if (o != NULL && o->tile != -1 && coopnet_is_mirror_pid(o->pid)) {
+                out[count++] = o;
+            }
+        }
+    }
+    return count;
 }
 
 static Object* coopnet_find_or_spawn_companion(int pid, int tile, int elevation)
@@ -4983,11 +5010,13 @@ static void coopnet_refresh_critter_fid(Object* critter)
         return;
     }
 
-    int base = art_vault_guy_num;
+    // The vault suit by the critter's own gender (art_vault_guy_num is the host's character's).
+    bool female = stat_level(critter, STAT_GENDER) == GENDER_FEMALE;
+    int base = art_vault_person_nums[female ? GENDER_FEMALE : GENDER_MALE];
     Object* worn = inven_worn(critter);
     Proto* proto;
     if (worn != NULL && proto_ptr(worn->pid, &proto) != -1) {
-        int v = stat_level(critter, STAT_GENDER) == GENDER_FEMALE ? proto->item.data.armor.femaleFid : proto->item.data.armor.maleFid;
+        int v = female ? proto->item.data.armor.femaleFid : proto->item.data.armor.maleFid;
         if (v != -1) {
             base = v;
         }
@@ -6166,6 +6195,7 @@ static void coopnet_client_send_character()
     for (int i = 0; i < PERK_COUNT; i++) {
         msg.perks[i] = perk_level(i);
     }
+    msg.gender = stat_level(obj_dude, STAT_GENDER);
 
     // The client's own screen shows its character under its own name.
     snprintf(g_coopCompanionName, sizeof(g_coopCompanionName), "%s", msg.name);
@@ -6229,7 +6259,9 @@ static void coopnet_host_apply_client_character(const CoopCharacter& c, bool ann
         data->bonusStats[i] = c.bonus[i];
     }
     data->bonusStats[STAT_MAXIMUM_HIT_POINTS] = c.hpBonus;
+    data->baseStats[STAT_GENDER] = c.gender == GENDER_FEMALE ? GENDER_FEMALE : GENDER_MALE;
     stat_recalc_derived(g_coopCompanion);
+    coopnet_refresh_critter_fid(g_coopCompanion);
     perk_coop_set_companion(c.perks, PERK_COUNT);
     trait_coop_set_companion(c.traits, TRAIT_COUNT);
     {
@@ -9585,6 +9617,9 @@ static void coopnet_net_stats_tick()
 void coopnet_poll()
 {
     coopnet_net_stats_tick();
+    if (g_coopRole != CoopRole::None) {
+        obj_refresh_friend_names();
+    }
 
     // A join that's still retrying has no session (role None) between attempts.
     coopnet_client_retry_tick();

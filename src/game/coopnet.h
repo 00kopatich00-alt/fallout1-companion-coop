@@ -116,6 +116,7 @@ const char* coopnet_friend_name(Object* obj);
 // coopnet_is_companion(), plus, on a friend's PC, the other friends'
 // characters (they are friends, not enemies: no red outline).
 bool coopnet_is_friend_character(Object* obj);
+int coopnet_friend_characters(Object** out, int max);
 
 // True for a friend's character whose friend is connected right now.
 bool coopnet_companion_is_played(Object* obj);
